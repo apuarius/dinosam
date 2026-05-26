@@ -5,7 +5,7 @@ dinov3:
   repo_dir: third_party/dinov3
   model_name: dinov3_vitl16
   pretrained: true
-  weights: weights/dinov3/dinov3_vitl16.pth
+  weights: weights/dinov3/dinov3_vitl16_sat493m.pth
   device: cuda
   freeze: true
   eval_mode: true
