@@ -2,6 +2,7 @@ from pathlib import Path
 
 
 def check_path(name: str, path: Path) -> bool:
+    """检查指定路径是否存在，并用统一格式打印检查结果。"""
     if path.exists():
         print(f"[OK] {name}: {path}")
         return True
@@ -11,6 +12,7 @@ def check_path(name: str, path: Path) -> bool:
 
 
 def main() -> int:
+    """检查项目必需的 submodule 路径是否已经正确初始化。"""
     repo_root = Path(__file__).resolve().parents[1]
 
     checks = {

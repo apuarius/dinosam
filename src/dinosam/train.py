@@ -7,6 +7,7 @@ from dinosam.project import require_paths, resolve_project_path
 
 
 def parse_scalar(value: str) -> Any:
+    """把简单 YAML 标量文本转换成 Python 值。"""
     value = value.strip()
     if value in {"true", "True"}:
         return True
@@ -31,6 +32,7 @@ def parse_scalar(value: str) -> Any:
 
 
 def load_simple_yaml(path: Path) -> dict[str, Any]:
+    """在未安装 PyYAML 时读取 smoke 配置使用的简化 YAML。"""
     data: dict[str, Any] = {}
     current_section: dict[str, Any] | None = None
 
@@ -60,6 +62,7 @@ def load_simple_yaml(path: Path) -> dict[str, Any]:
 
 
 def load_config(path: Path) -> dict[str, Any]:
+    """读取训练配置文件，优先使用 PyYAML，缺失时退回简化解析器。"""
     try:
         import yaml
     except ImportError:
@@ -75,6 +78,7 @@ def load_config(path: Path) -> dict[str, Any]:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """构建训练入口的命令行参数解析器。"""
     parser = argparse.ArgumentParser(description="DINOv3 + SAM2 training entrypoint.")
     parser.add_argument(
         "--config",
@@ -86,6 +90,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    """训练入口的主流程：读取配置并执行最小路径检查。"""
     args = build_parser().parse_args()
     config_path = resolve_project_path(args.config)
 
