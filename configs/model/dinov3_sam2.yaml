@@ -1,0 +1,18 @@
+# DINOv3 与 SAM2 的模型配置集中放在这里。
+# 训练配置只引用这个文件，避免把模型名和 checkpoint 路径散落到代码里。
+
+dinov3:
+  repo_dir: third_party/dinov3
+  model_name: dinov3_vitl16
+  pretrained: true
+  weights: weights/dinov3/dinov3_vitl16.pth
+  device: cuda
+  freeze: true
+  eval_mode: true
+
+sam2:
+  repo_dir: third_party/sam2
+  model_cfg: configs/sam2.1/sam2.1_hiera_l.yaml
+  checkpoint: weights/sam2/sam2.1_hiera_large.pt
+  device: cuda
+  mode: eval

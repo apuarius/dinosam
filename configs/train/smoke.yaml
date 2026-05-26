@@ -2,6 +2,8 @@ experiment:
   name: smoke
   seed: 42
 
+model_config: configs/model/dinov3_sam2.yaml
+
 paths:
   data_dir: data
   weights_dir: weights

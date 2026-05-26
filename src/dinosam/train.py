@@ -3,6 +3,7 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any
 
+from dinosam.models.config import build_model_configs
 from dinosam.project import require_paths, resolve_project_path
 
 
@@ -89,6 +90,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_referenced_model_config(config: dict[str, Any]) -> tuple[Path, dict[str, Any]] | None:
+    """读取训练配置中 model_config 指向的模型配置文件。"""
+    model_config_value = config.get("model_config")
+    if not model_config_value:
+        return None
+
+    model_config_path = resolve_project_path(model_config_value)
+    if not model_config_path.exists():
+        raise FileNotFoundError(f"Model config file does not exist: {model_config_path}")
+
+    return model_config_path, load_config(model_config_path)
+
+
 def main() -> int:
     """训练入口的主流程：读取配置并执行最小路径检查。"""
     args = build_parser().parse_args()
@@ -102,14 +116,34 @@ def main() -> int:
     print(pformat(config, sort_dicts=False))
     print()
 
+    model_configs = None
+    model_config_result = load_referenced_model_config(config)
+    if model_config_result is not None:
+        model_config_path, model_config = model_config_result
+        model_configs = build_model_configs(model_config)
+        print(f"Loaded model config: {model_config_path}")
+        print(pformat(model_config, sort_dicts=False))
+        print()
+        print("Resolved model wrapper configs:")
+        print(pformat(model_configs, sort_dicts=False))
+        print()
+
     paths = config.get("paths", {})
     third_party = config.get("third_party", {})
     required_paths = {
         "data_dir": paths.get("data_dir", "data"),
         "weights_dir": paths.get("weights_dir", "weights"),
         "outputs_dir": paths.get("outputs_dir", "outputs"),
-        "DINOv3": third_party.get("dinov3_dir", "third_party/dinov3"),
-        "SAM2": third_party.get("sam2_dir", "third_party/sam2"),
+        "DINOv3": (
+            model_configs.dinov3.repo_dir
+            if model_configs is not None
+            else third_party.get("dinov3_dir", "third_party/dinov3")
+        ),
+        "SAM2": (
+            model_configs.sam2.repo_dir
+            if model_configs is not None
+            else third_party.get("sam2_dir", "third_party/sam2")
+        ),
     }
 
     ok = require_paths(required_paths)
