@@ -17,8 +17,29 @@ DINOv3 + SAM2 experiment workspace.
 
 ```bash
 git clone --recurse-submodules <repo-url>
+```
+
 If already cloned without submodules:
 
+```bash
 git submodule update --init --recursive
-Current external versions
+```
+
+## Setup
+
+```bash
+pip install -e .
+```
+
+## Smoke Checks
+
+```bash
+python scripts/check_submodules.py
+python -m dinosam.train --config configs/train/smoke.yaml
+```
+
+## Current External Versions
+
+```bash
 git submodule status
+```

@@ -1,0 +1,16 @@
+experiment:
+  name: smoke
+  seed: 42
+
+paths:
+  data_dir: data
+  weights_dir: weights
+  outputs_dir: outputs
+
+third_party:
+  dinov3_dir: third_party/dinov3
+  sam2_dir: third_party/sam2
+
+run:
+  mode: smoke
+  device: cuda
