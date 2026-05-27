@@ -9,6 +9,8 @@ description = "DINOv3 and SAM2 experiment workspace"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+    "numpy",
+    "pillow",
     "pyyaml",
 ]
 
