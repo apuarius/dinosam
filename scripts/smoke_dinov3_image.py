@@ -1,5 +1,6 @@
 import argparse
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -10,16 +11,11 @@ if str(SRC_DIR) not in sys.path:
 
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
+from PIL import Image  # noqa: E402
 
 from dinosam.models import DINOv3Wrapper, build_dinov3_config  # noqa: E402
 from dinosam.project import resolve_project_path  # noqa: E402
 from dinosam.train import load_config  # noqa: E402
-
-
-DINOV3_VITL16_SAT493M_URL = (
-    "https://dl.fbaipublicfiles.com/dinov3/dinov3_vitl16/"
-    "dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth"
-)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -28,25 +24,34 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--model-config",
         default="configs/model/dinov3_sam2.yaml",
-        help="Model config containing the DINOv3 weight path.",
+        help="Model config containing the DINOv3 loading settings.",
     )
     return parser
 
 
 def require_file(path: Path, label: str) -> None:
-    """检查必需文件是否存在，缺失时给出下载提示。"""
-    if path.exists():
-        return
-
-    print(f"[MISSING] {label}: {path}")
-    print()
-    print("Download the DINOv3 ViT-L/16 SAT-493M weight with:")
-    print(f"wget -O {path} {DINOV3_VITL16_SAT493M_URL}")
-    raise FileNotFoundError(f"{label} does not exist: {path}")
+    """检查必须文件是否存在，缺失时给出明确的错误位置。"""
+    if not path.exists():
+        raise FileNotFoundError(f"{label} does not exist: {path}")
 
 
-def make_synthetic_satellite_image(size: int = 256) -> np.ndarray:
-    """生成一张简化卫星风格 RGB 图片用于验证 DINOv3 前向流程。"""
+def require_dir(path: Path, label: str) -> None:
+    """检查必须目录是否存在，缺失时给出明确的错误位置。"""
+    if not path.exists():
+        raise FileNotFoundError(f"{label} does not exist: {path}")
+    if not path.is_dir():
+        raise NotADirectoryError(f"{label} is not a directory: {path}")
+
+
+def require_hf_model_dir(path: Path) -> None:
+    """检查 Hugging Face 本地模型目录是否包含 DINOv3 加载所需文件。"""
+    require_dir(path, "DINOv3 Hugging Face model directory")
+    for filename in ("config.json", "model.safetensors", "preprocessor_config.json"):
+        require_file(path / filename, f"DINOv3 Hugging Face {filename}")
+
+
+def make_synthetic_satellite_image(size: int = 224) -> np.ndarray:
+    """生成一张简化卫星风格 RGB 图，用于验证 DINOv3 前向流程。"""
     yy, xx = np.mgrid[0:size, 0:size]
     image = np.zeros((size, size, 3), dtype=np.uint8)
 
@@ -54,15 +59,15 @@ def make_synthetic_satellite_image(size: int = 256) -> np.ndarray:
     image[..., 1] = 95 + (yy % 64)
     image[..., 2] = 55 + ((xx + yy) % 40)
 
-    image[40:120, 48:180] = (80, 130, 80)
-    image[145:220, 60:210] = (150, 135, 95)
-    image[120:136, :] = (55, 85, 120)
-    image[:, 124:140] = (60, 90, 125)
+    image[32:96, 36:160] = (80, 130, 80)
+    image[118:196, 50:188] = (150, 135, 95)
+    image[104:118, :] = (55, 85, 120)
+    image[:, 108:122] = (60, 90, 125)
     return image
 
 
 def normalize_sat493m(image: np.ndarray) -> torch.Tensor:
-    """按 DINOv3 官方 SAT-493M 参数把 RGB 图片转换成模型输入张量。"""
+    """按 DINOv3 SAT-493M 参数把 RGB 图转换成 torch.hub 路线的输入张量。"""
     mean = torch.tensor([0.430, 0.411, 0.296]).view(3, 1, 1)
     std = torch.tensor([0.213, 0.156, 0.143]).view(3, 1, 1)
 
@@ -77,9 +82,14 @@ def describe_features(value: Any, prefix: str = "features") -> None:
         print(f"{prefix}: shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device}")
         return
 
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         for key, item in value.items():
             describe_features(item, f"{prefix}.{key}")
+        return
+
+    if hasattr(value, "to_tuple"):
+        for index, item in enumerate(value.to_tuple()):
+            describe_features(item, f"{prefix}[{index}]")
         return
 
     if isinstance(value, (list, tuple)):
@@ -90,8 +100,32 @@ def describe_features(value: Any, prefix: str = "features") -> None:
     print(f"{prefix}: {type(value).__name__}")
 
 
+def print_dinov3_source(dinov3_config: Any) -> None:
+    """根据加载方式打印当前 DINOv3 smoke test 将读取的模型来源。"""
+    load_from = dinov3_config.load_from.lower()
+    print(f"DINOv3 load_from: {load_from}")
+
+    if load_from == "huggingface":
+        if dinov3_config.hf_model_dir is None:
+            raise ValueError("DINOv3 hf_model_dir is not configured.")
+        model_dir = resolve_project_path(dinov3_config.hf_model_dir)
+        require_hf_model_dir(model_dir)
+        print(f"Loading DINOv3 Hugging Face model from: {model_dir}")
+        return
+
+    if load_from == "torch_hub":
+        if dinov3_config.weights is None:
+            raise ValueError("DINOv3 weights are not configured.")
+        weight_path = resolve_project_path(dinov3_config.weights)
+        require_file(weight_path, "DINOv3 .pth weights")
+        print(f"Loading DINOv3 torch.hub model from: {weight_path}")
+        return
+
+    raise ValueError(f"Unsupported DINOv3 load_from value: {dinov3_config.load_from}")
+
+
 def main() -> int:
-    """加载 DINOv3 卫星权重，对一张合成图执行一次特征提取。"""
+    """加载 DINOv3 卫星权重，并对一张合成图执行一次特征提取。"""
     args = build_parser().parse_args()
 
     model_config_path = resolve_project_path(args.model_config)
@@ -99,18 +133,17 @@ def main() -> int:
 
     model_config = load_config(model_config_path)
     dinov3_config = build_dinov3_config(model_config)
-    if dinov3_config.weights is None:
-        raise ValueError("DINOv3 weights are not configured.")
+    print_dinov3_source(dinov3_config)
 
-    weight_path = resolve_project_path(dinov3_config.weights)
-    require_file(weight_path, "DINOv3 weights")
-
-    print(f"Loading DINOv3 from: {weight_path}")
     dinov3 = DINOv3Wrapper.from_config(dinov3_config)
-
     image = make_synthetic_satellite_image()
-    inputs = normalize_sat493m(image).to(dinov3_config.device)
-    print(f"Input tensor: shape={tuple(inputs.shape)}, dtype={inputs.dtype}, device={inputs.device}")
+
+    if dinov3_config.load_from.lower() == "huggingface":
+        inputs = Image.fromarray(image)
+        print(f"Input image: size={inputs.size}, mode={inputs.mode}")
+    else:
+        inputs = normalize_sat493m(image).to(dinov3_config.device)
+        print(f"Input tensor: shape={tuple(inputs.shape)}, dtype={inputs.dtype}, device={inputs.device}")
 
     with torch.inference_mode():
         features = dinov3(inputs)

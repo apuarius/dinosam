@@ -12,6 +12,8 @@ dependencies = [
     "numpy",
     "pillow",
     "pyyaml",
+    "safetensors",
+    "transformers>=4.56.0",
 ]
 
 [tool.setuptools.packages.find]

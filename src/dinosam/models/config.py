@@ -25,6 +25,8 @@ def build_dinov3_config(config: Mapping[str, Any]) -> DINOv3Config:
     """把 YAML 中的 dinov3 section 转换成 DINOv3Config。"""
     section = _section(config, "dinov3")
     return DINOv3Config(
+        load_from=section.get("load_from", "torch_hub"),
+        hf_model_dir=section.get("hf_model_dir"),
         repo_dir=section.get("repo_dir", "third_party/dinov3"),
         model_name=section.get("model_name", "dinov3_vitl16"),
         pretrained=section.get("pretrained", True),

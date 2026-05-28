@@ -47,6 +47,10 @@ def collect_workspace_dirs(model_config: dict[str, Any]) -> list[Path]:
             if value:
                 dirs.append(resolve_path(value).parent)
 
+        hf_model_dir = section.get("hf_model_dir")
+        if hf_model_dir:
+            dirs.append(resolve_path(hf_model_dir))
+
     return sorted(set(dirs))
 
 
@@ -55,8 +59,15 @@ def collect_expected_files(model_config: dict[str, Any]) -> dict[str, Path]:
     expected: dict[str, Path] = {}
 
     dinov3 = model_config.get("dinov3", {})
-    if isinstance(dinov3, dict) and dinov3.get("weights"):
-        expected["DINOv3 weights"] = resolve_path(dinov3["weights"])
+    if isinstance(dinov3, dict):
+        if dinov3.get("weights"):
+            expected["DINOv3 weights"] = resolve_path(dinov3["weights"])
+
+        if dinov3.get("hf_model_dir"):
+            model_dir = resolve_path(dinov3["hf_model_dir"])
+            expected["DINOv3 HF config"] = model_dir / "config.json"
+            expected["DINOv3 HF weights"] = model_dir / "model.safetensors"
+            expected["DINOv3 HF processor"] = model_dir / "preprocessor_config.json"
 
     sam2 = model_config.get("sam2", {})
     if isinstance(sam2, dict) and sam2.get("checkpoint"):

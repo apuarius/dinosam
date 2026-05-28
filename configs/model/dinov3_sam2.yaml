@@ -1,11 +1,9 @@
 # DINOv3 与 SAM2 的模型配置集中放在这里。
-# 训练配置只引用这个文件，避免把模型名和 checkpoint 路径散落到代码里。
-
+# 训练和验证脚本只引用这个文件，避免把模型名和 checkpoint 路径散落到代码里。
 dinov3:
-  repo_dir: third_party/dinov3
-  model_name: dinov3_vitl16
-  pretrained: true
-  weights: weights/dinov3/dinov3_vitl16_pretrain_sat493m-eadcf0ff.pth
+  # 这里使用 Hugging Face 本地目录，因为 SAT-493M 权重已经以 safetensors 形式上传。
+  load_from: huggingface
+  hf_model_dir: weights/dinov3/dinov3-vitl16-pretrain-sat493m
   device: cuda
   freeze: true
   eval_mode: true
