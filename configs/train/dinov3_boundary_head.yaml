@@ -38,3 +38,7 @@ runtime:
   cache_features: true
   feature_cache_dir: null
   device: null
+  resume: true
+  resume_checkpoint: null
+  visualize_every: 5
+  visualize_samples: 8

@@ -67,6 +67,10 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "cache_features": True,
     "feature_cache_dir": None,
     "device": None,
+    "resume": True,
+    "resume_checkpoint": None,
+    "visualize_every": 5,
+    "visualize_samples": 8,
 }
 
 
@@ -78,7 +82,16 @@ CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
     "head": ("hidden_channels", "dropout"),
     "loss": ("boundary_loss_weight", "foreground_loss_weight", "max_pos_weight"),
     "target": ("target_threshold", "gt_boundary_dilation"),
-    "runtime": ("seed", "cache_features", "feature_cache_dir", "device"),
+    "runtime": (
+        "seed",
+        "cache_features",
+        "feature_cache_dir",
+        "device",
+        "resume",
+        "resume_checkpoint",
+        "visualize_every",
+        "visualize_samples",
+    ),
 }
 
 
@@ -151,7 +164,16 @@ class BinaryMetricAccumulator:
         """计算完整指标，包括 AP 和 ROC-AUC。"""
         metrics: dict[str, float | None] = dict(self.compute_fast())
         if not self.scores:
-            metrics.update({"ap": None, "auc": None})
+            metrics.update(
+                {
+                    "ap": None,
+                    "auc": None,
+                    "best_f1": None,
+                    "best_precision": None,
+                    "best_recall": None,
+                    "best_threshold": None,
+                }
+            )
             return metrics
 
         scores = np.concatenate(self.scores)
@@ -162,7 +184,38 @@ class BinaryMetricAccumulator:
                 "auc": score_map_auc(scores, targets),
             }
         )
+        metrics.update(best_binary_f1(scores, targets))
         return metrics
+
+
+def best_binary_f1(scores: np.ndarray, targets: np.ndarray) -> dict[str, float | None]:
+    """在所有预测分数阈值上搜索最佳 F1 和对应阈值。"""
+    flat_scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    flat_targets = np.asarray(targets, dtype=bool).reshape(-1)
+    positives = int(flat_targets.sum())
+    if positives == 0 or flat_scores.size == 0:
+        return {
+            "best_f1": None,
+            "best_precision": None,
+            "best_recall": None,
+            "best_threshold": None,
+        }
+
+    order = np.argsort(-flat_scores, kind="mergesort")
+    sorted_targets = flat_targets[order]
+    sorted_scores = flat_scores[order]
+    true_positive = np.cumsum(sorted_targets)
+    predicted_positive = np.arange(1, sorted_targets.size + 1, dtype=np.float64)
+    precision = true_positive / predicted_positive
+    recall = true_positive / max(float(positives), 1.0)
+    f1 = 2.0 * precision * recall / np.maximum(precision + recall, 1e-12)
+    best_index = int(np.argmax(f1))
+    return {
+        "best_f1": float(f1[best_index]),
+        "best_precision": float(precision[best_index]),
+        "best_recall": float(recall[best_index]),
+        "best_threshold": float(sorted_scores[best_index]),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -191,6 +244,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-features", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--feature-cache-dir", default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--resume-checkpoint", default=None)
+    parser.add_argument("--visualize-every", type=int, default=None)
+    parser.add_argument("--visualize-samples", type=int, default=None)
     return parser
 
 
@@ -412,6 +469,120 @@ def format_metric(value: float | None, digits: int = 4) -> str:
     return f"{value:.{digits}f}"
 
 
+def resize_probability_map(value: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """把 patch 级概率图缩放到原图宽高，便于保存可视化结果。"""
+    image = Image.fromarray(value.astype(np.float32), mode="F")
+    resized = image.resize(size, Image.Resampling.BILINEAR)
+    return np.asarray(resized, dtype=np.float32)
+
+
+def colorize_probability_map(value: np.ndarray) -> np.ndarray:
+    """把 0 到 1 的概率图转换成蓝绿黄红伪彩色图。"""
+    values = np.clip(value, 0.0, 1.0).astype(np.float32)
+    anchors = np.asarray(
+        [
+            [8, 24, 64],
+            [0, 112, 192],
+            [72, 184, 112],
+            [248, 220, 96],
+            [232, 64, 48],
+        ],
+        dtype=np.float32,
+    )
+    scaled = values * (len(anchors) - 1)
+    left = np.floor(scaled).astype(np.int32)
+    right = np.clip(left + 1, 0, len(anchors) - 1)
+    weight = (scaled - left)[..., None]
+    colors = anchors[left] * (1.0 - weight) + anchors[right] * weight
+    return np.clip(colors, 0, 255).astype(np.uint8)
+
+
+def gt_boundary_overlay(image: np.ndarray, instance_mask: np.ndarray) -> np.ndarray:
+    """把 GT 实例边界用绿色叠加到原始图像上。"""
+    overlay = image.copy()
+    boundary = dilate_binary_mask(label_boundary_map(instance_mask), radius=1)
+    overlay[boundary] = np.asarray([0, 255, 120], dtype=np.uint8)
+    return overlay
+
+
+def save_prediction_panel(
+    image: Image.Image,
+    instance_mask: np.ndarray,
+    boundary_probability: np.ndarray,
+    foreground_probability: np.ndarray,
+    output_path: Path,
+) -> None:
+    """保存原图、GT 边界、预测边界概率和预测田块概率的对比图。"""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image_array = np.asarray(image.convert("RGB"))
+    image_size = image.size
+    boundary_map = resize_probability_map(boundary_probability, image_size)
+    foreground_map = resize_probability_map(foreground_probability, image_size)
+    panels = [
+        Image.fromarray(image_array),
+        Image.fromarray(gt_boundary_overlay(image_array, instance_mask)),
+        Image.fromarray(colorize_probability_map(boundary_map)),
+        Image.fromarray(colorize_probability_map(foreground_map)),
+    ]
+    width, height = panels[0].size
+    canvas = Image.new("RGB", (width * len(panels), height))
+    for index, panel in enumerate(panels):
+        canvas.paste(panel, (index * width, 0))
+    canvas.save(output_path)
+
+
+def save_validation_visualizations(
+    *,
+    epoch: int,
+    loader: DataLoader,
+    dinov3: DINOv3Wrapper,
+    head: torch.nn.Module,
+    cache_dir: Path,
+    output_dir: Path,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> None:
+    """在验证集上保存少量预测可视化，帮助判断检测头学到的空间模式。"""
+    if args.visualize_every is None or args.visualize_every <= 0:
+        return
+    if args.visualize_samples is None or args.visualize_samples <= 0:
+        return
+    if epoch % args.visualize_every != 0 and epoch != args.epochs:
+        return
+
+    head.eval()
+    saved = 0
+    visual_dir = output_dir / "visualizations" / f"epoch_{epoch:04d}"
+    with torch.no_grad():
+        for batch in loader:
+            images = batch["images"]
+            names = batch["names"]
+            instance_masks = batch["instance_masks"]
+            features = load_or_extract_features(
+                dinov3=dinov3,
+                images=images,
+                names=names,
+                split="val",
+                cache_dir=cache_dir,
+                cache_features=args.cache_features,
+                device=device,
+            )
+            probabilities = torch.sigmoid(head(features)).detach().float().cpu().numpy()
+            for index, name in enumerate(names):
+                output_path = visual_dir / f"{Path(name).stem}.png"
+                save_prediction_panel(
+                    image=images[index],
+                    instance_mask=instance_masks[index],
+                    boundary_probability=probabilities[index, 0],
+                    foreground_probability=probabilities[index, 1],
+                    output_path=output_path,
+                )
+                saved += 1
+                if saved >= args.visualize_samples:
+                    print(f"Saved visualizations: {visual_dir}")
+                    return
+
+
 def run_epoch(
     *,
     epoch: int,
@@ -509,10 +680,27 @@ def run_epoch(
 def write_csv_row(path: Path, row: dict[str, Any]) -> None:
     """把一个 epoch 的指标追加写入 CSV，方便后续用表格或画图查看。"""
     path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = list(row.keys())
+    if path.exists() and path.stat().st_size > 0:
+        with path.open("r", newline="", encoding="utf-8") as handle:
+            reader = csv.DictReader(handle)
+            existing_fieldnames = list(reader.fieldnames or [])
+            rows = list(reader)
+        if existing_fieldnames and existing_fieldnames != fieldnames:
+            merged_fieldnames = existing_fieldnames + [
+                key for key in fieldnames if key not in existing_fieldnames
+            ]
+            rows.append({key: row.get(key, "") for key in merged_fieldnames})
+            with path.open("w", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=merged_fieldnames)
+                writer.writeheader()
+                writer.writerows(rows)
+            return
+
     exists = path.exists()
     with path.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(row.keys()))
-        if not exists:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        if not exists or path.stat().st_size == 0:
             writer.writeheader()
         writer.writerow(row)
 
@@ -545,6 +733,54 @@ def save_checkpoint(
         },
         path,
     )
+
+
+def checkpoint_score(metrics: Mapping[str, Any] | None) -> float:
+    """从 checkpoint 指标中取出用于选择 best.pt 的验证分数。"""
+    if not metrics:
+        return -1.0
+    value = metrics.get("val_boundary_best_f1")
+    if value is None:
+        value = metrics.get("val_boundary_f1")
+    return float(value or -1.0)
+
+
+def load_checkpoint_score(path: Path) -> float:
+    """读取 checkpoint 中的 best 评价分数，失败时返回 -1。"""
+    if not path.exists():
+        return -1.0
+    checkpoint = torch.load(path, map_location="cpu")
+    if not isinstance(checkpoint, Mapping):
+        return -1.0
+    return checkpoint_score(checkpoint.get("metrics"))
+
+
+def resolve_resume_checkpoint(args: argparse.Namespace, output_dir: Path) -> Path | None:
+    """根据配置决定是否从 last.pt 继续训练。"""
+    if not args.resume:
+        return None
+    if args.resume_checkpoint:
+        path = resolve_project_path(args.resume_checkpoint)
+    else:
+        path = output_dir / "checkpoints" / "last.pt"
+    return path if path.exists() else None
+
+
+def resume_from_checkpoint(
+    checkpoint_path: Path,
+    head: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+) -> tuple[int, float]:
+    """加载检测头和优化器状态，并返回下一轮 epoch 与历史验证分数。"""
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    head.load_state_dict(checkpoint["head_state_dict"])
+    optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    completed_epoch = int(checkpoint.get("epoch", 0))
+    best_score = checkpoint_score(checkpoint.get("metrics"))
+    print(f"Resumed checkpoint: {checkpoint_path}")
+    print(f"Completed epoch: {completed_epoch}; next epoch: {completed_epoch + 1}")
+    return completed_epoch + 1, best_score
 
 
 def prefixed_metrics(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
@@ -601,58 +837,72 @@ def main() -> int:
     print(f"Feature cache: {'on' if args.cache_features else 'off'} -> {cache_dir}")
     print(f"Output dir: {output_dir}")
 
-    best_metric = -1.0
+    best_metric = load_checkpoint_score(output_dir / "checkpoints" / "best.pt")
+    start_epoch = 1
+    resume_checkpoint = resolve_resume_checkpoint(args, output_dir)
+    if resume_checkpoint is not None:
+        start_epoch, resume_score = resume_from_checkpoint(
+            checkpoint_path=resume_checkpoint,
+            head=head,
+            optimizer=optimizer,
+            device=device,
+        )
+        best_metric = max(best_metric, resume_score)
+
+    if start_epoch > args.epochs:
+        print(f"Training is already complete: last epoch >= configured epochs ({args.epochs}).")
+        return 0
+
     start_time = time.time()
-    for epoch in range(1, args.epochs + 1):
-        train_metrics = run_epoch(
-            epoch=epoch,
-            epochs=args.epochs,
-            split="train",
-            loader=train_loader,
-            dinov3=dinov3,
-            head=head,
-            optimizer=optimizer,
-            cache_dir=cache_dir,
-            args=args,
-            device=device,
-        )
-        val_metrics = run_epoch(
-            epoch=epoch,
-            epochs=args.epochs,
-            split="val",
-            loader=val_loader,
-            dinov3=dinov3,
-            head=head,
-            optimizer=None,
-            cache_dir=cache_dir,
-            args=args,
-            device=device,
-        )
+    try:
+        for epoch in range(start_epoch, args.epochs + 1):
+            train_metrics = run_epoch(
+                epoch=epoch,
+                epochs=args.epochs,
+                split="train",
+                loader=train_loader,
+                dinov3=dinov3,
+                head=head,
+                optimizer=optimizer,
+                cache_dir=cache_dir,
+                args=args,
+                device=device,
+            )
+            val_metrics = run_epoch(
+                epoch=epoch,
+                epochs=args.epochs,
+                split="val",
+                loader=val_loader,
+                dinov3=dinov3,
+                head=head,
+                optimizer=None,
+                cache_dir=cache_dir,
+                args=args,
+                device=device,
+            )
+            save_validation_visualizations(
+                epoch=epoch,
+                loader=val_loader,
+                dinov3=dinov3,
+                head=head,
+                cache_dir=cache_dir,
+                output_dir=output_dir,
+                args=args,
+                device=device,
+            )
 
-        epoch_row: dict[str, Any] = {
-            "epoch": epoch,
-            "lr": optimizer.param_groups[0]["lr"],
-            "elapsed_min": (time.time() - start_time) / 60.0,
-        }
-        epoch_row.update(prefixed_metrics("train", train_metrics))
-        epoch_row.update(prefixed_metrics("val", val_metrics))
+            epoch_row: dict[str, Any] = {
+                "epoch": epoch,
+                "lr": optimizer.param_groups[0]["lr"],
+                "elapsed_min": (time.time() - start_time) / 60.0,
+            }
+            epoch_row.update(prefixed_metrics("train", train_metrics))
+            epoch_row.update(prefixed_metrics("val", val_metrics))
 
-        write_csv_row(metrics_csv, epoch_row)
-        write_jsonl_row(metrics_jsonl, epoch_row)
-        save_checkpoint(
-            output_dir / "checkpoints" / "last.pt",
-            epoch=epoch,
-            head=head,
-            optimizer=optimizer,
-            metrics=epoch_row,
-            args=args,
-        )
-
-        score = float(val_metrics.get("boundary_f1") or 0.0)
-        if score > best_metric:
-            best_metric = score
+            write_csv_row(metrics_csv, epoch_row)
+            write_jsonl_row(metrics_jsonl, epoch_row)
             save_checkpoint(
-                output_dir / "checkpoints" / "best.pt",
+                output_dir / "checkpoints" / "last.pt",
                 epoch=epoch,
                 head=head,
                 optimizer=optimizer,
@@ -660,15 +910,33 @@ def main() -> int:
                 args=args,
             )
 
-        print(
-            "Epoch "
-            f"{epoch}/{args.epochs} | "
-            f"train_loss={train_metrics['loss']:.4f} | "
-            f"val_loss={val_metrics['loss']:.4f} | "
-            f"val_boundary_f1={format_metric(val_metrics.get('boundary_f1'))} | "
-            f"val_boundary_ap={format_metric(val_metrics.get('boundary_ap'))} | "
-            f"val_foreground_iou={format_metric(val_metrics.get('foreground_iou'))}"
-        )
+            score = float(val_metrics.get("boundary_best_f1") or val_metrics.get("boundary_f1") or 0.0)
+            if score > best_metric:
+                best_metric = score
+                save_checkpoint(
+                    output_dir / "checkpoints" / "best.pt",
+                    epoch=epoch,
+                    head=head,
+                    optimizer=optimizer,
+                    metrics=epoch_row,
+                    args=args,
+                )
+
+            print(
+                "Epoch "
+                f"{epoch}/{args.epochs} | "
+                f"train_loss={train_metrics['loss']:.4f} | "
+                f"val_loss={val_metrics['loss']:.4f} | "
+                f"val_boundary_f1={format_metric(val_metrics.get('boundary_f1'))} | "
+                f"val_boundary_best_f1={format_metric(val_metrics.get('boundary_best_f1'))} | "
+                f"val_boundary_best_thr={format_metric(val_metrics.get('boundary_best_threshold'))} | "
+                f"val_boundary_ap={format_metric(val_metrics.get('boundary_ap'))} | "
+                f"val_foreground_iou={format_metric(val_metrics.get('foreground_iou'))}"
+            )
+    except KeyboardInterrupt:
+        print()
+        print("Training interrupted. Resume later with the same command; last completed epoch is saved in last.pt.")
+        return 130
 
     print(f"Saved metrics: {metrics_csv}")
     print(f"Saved best checkpoint: {output_dir / 'checkpoints' / 'best.pt'}")
