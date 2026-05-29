@@ -6,13 +6,13 @@ __pycache__/
 .venv/
 .env
 
-data/
-weights/
-outputs/
+/data/
+/weights/
+/outputs/
 
-runs/
-wandb/
-mlruns/
+/runs/
+/wandb/
+/mlruns/
 
 *.pt
 *.pth

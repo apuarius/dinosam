@@ -19,7 +19,7 @@ git submodule update --init --recursive
 ## 2. 安装项目
 
 ```bash
-conda create -n dinosam python=3.10 -y
+conda create -n dinosam python=3.11 -y
 conda activate dinosam
 pip install -U pip
 pip install -e .
@@ -81,3 +81,12 @@ pip freeze > outputs/requirements.lock.txt
 ```
 
 这些信息之后用来复现实验。
+
+## 7. 桥接实验
+
+模型 smoke test 都通过后，按 `docs/bridge_experiments.md` 先跑小批量：
+
+```bash
+python scripts/run_oracle_sam2_prompts.py --dataset-root data/sam2-dataset-1024 --limit 10
+python scripts/export_dinov3_boundary_maps.py --dataset-root data/sam2-dataset-1024 --limit 20
+```
