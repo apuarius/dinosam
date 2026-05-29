@@ -53,6 +53,20 @@ def _square_grid_size(token_count: int) -> int | None:
     return None
 
 
+def _reshape_square_tokens(array: np.ndarray, special_tokens: int) -> np.ndarray | None:
+    """尝试跳过开头的特殊 token，并把剩余 patch token 还原成正方形网格。"""
+    patch_count = array.shape[0] - special_tokens
+    if patch_count <= 0:
+        return None
+
+    grid_size = _square_grid_size(patch_count)
+    if grid_size is None:
+        return None
+
+    patch_tokens = array[special_tokens:]
+    return patch_tokens.reshape(grid_size, grid_size, array.shape[-1]).astype(np.float32, copy=False)
+
+
 def _reshape_token_array(tokens: np.ndarray) -> np.ndarray | None:
     """把 NCH 或 NHWC 等常见 token 数组整理成 HWC 特征网格。"""
     array = tokens
@@ -68,15 +82,10 @@ def _reshape_token_array(tokens: np.ndarray) -> np.ndarray | None:
     if array.ndim != 2:
         return None
 
-    token_count = array.shape[0]
-    grid_size = _square_grid_size(token_count)
-    if grid_size is not None:
-        return array.reshape(grid_size, grid_size, array.shape[-1]).astype(np.float32, copy=False)
-
-    grid_size = _square_grid_size(token_count - 1)
-    if grid_size is not None:
-        patch_tokens = array[1:]
-        return patch_tokens.reshape(grid_size, grid_size, array.shape[-1]).astype(np.float32, copy=False)
+    for special_tokens in (0, 1, 5, 4, 2, 3, 6, 7, 8):
+        grid = _reshape_square_tokens(array, special_tokens=special_tokens)
+        if grid is not None:
+            return grid
 
     return None
 

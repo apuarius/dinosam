@@ -19,7 +19,7 @@ from dinosam.data.instance_tiles import (  # noqa: E402
     load_rgb_image,
     resolve_instance_dataset_root,
 )
-from dinosam.evaluation import mask_iou  # noqa: E402
+from dinosam.evaluation import binary_mask_stats, boundary_f1, mask_dice, mask_iou  # noqa: E402
 from dinosam.models import SAM2ImageWrapper, build_sam2_config  # noqa: E402
 from dinosam.project import resolve_project_path  # noqa: E402
 from dinosam.prompting import build_sam2_prompt_kwargs, prompts_from_instance_mask  # noqa: E402
@@ -88,11 +88,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Ask SAM2 to return multiple masks and choose the highest-score one.",
     )
+    parser.add_argument(
+        "--boundary-tolerance",
+        type=int,
+        default=2,
+        help="Pixel tolerance used when matching predicted and GT boundaries.",
+    )
     return parser
 
 
 def require_file(path: Path, label: str) -> None:
-    """检查必需文件是否存在，缺失时给出明确错误。"""
+    """检查必须文件是否存在，缺失时给出明确错误。"""
     if not path.exists():
         raise FileNotFoundError(f"{label} does not exist: {path}")
 
@@ -157,18 +163,40 @@ def save_overlay(
     composite.convert("RGB").save(output_path)
 
 
-def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """汇总 oracle prompt 实验的关键指标。"""
-    ious = [float(row["iou"]) for row in rows]
-    if not ious:
-        return {"instances": 0, "mean_iou": None, "median_iou": None}
+def summarize_metric(rows: list[dict[str, Any]], key: str) -> dict[str, float | None]:
+    """汇总单个评价指标的均值、中位数、最小值和最大值。"""
+    values = [float(row[key]) for row in rows if row.get(key) is not None]
+    if not values:
+        return {
+            f"mean_{key}": None,
+            f"median_{key}": None,
+            f"min_{key}": None,
+            f"max_{key}": None,
+        }
     return {
-        "instances": len(ious),
-        "mean_iou": mean(ious),
-        "median_iou": median(ious),
-        "min_iou": min(ious),
-        "max_iou": max(ious),
+        f"mean_{key}": mean(values),
+        f"median_{key}": median(values),
+        f"min_{key}": min(values),
+        f"max_{key}": max(values),
     }
+
+
+def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总 oracle prompt 实验的关键评价指标。"""
+    summary: dict[str, Any] = {"instances": len(rows)}
+    for key in (
+        "iou",
+        "dice",
+        "precision",
+        "recall",
+        "f1",
+        "boundary_precision",
+        "boundary_recall",
+        "boundary_f1",
+        "score",
+    ):
+        summary.update(summarize_metric(rows, key))
+    return summary
 
 
 def main() -> int:
@@ -224,7 +252,12 @@ def main() -> int:
                 )
                 predicted_mask, score = select_sam2_mask(prediction.masks, prediction.scores)
                 target_mask = instance_mask == prompt.instance_id
-                iou = mask_iou(predicted_mask, target_mask)
+                pixel_stats = binary_mask_stats(predicted_mask, target_mask)
+                boundary_stats = boundary_f1(
+                    predicted_mask,
+                    target_mask,
+                    tolerance=args.boundary_tolerance,
+                )
                 predicted_masks.append((prompt.instance_id, predicted_mask))
 
                 row = {
@@ -235,7 +268,10 @@ def main() -> int:
                     "point": [float(value) for value in prompt.point_coords[0].tolist()],
                     "prompt_mode": args.prompt_mode,
                     "score": score,
-                    "iou": iou,
+                    "iou": mask_iou(predicted_mask, target_mask),
+                    "dice": mask_dice(predicted_mask, target_mask),
+                    **pixel_stats,
+                    **boundary_stats,
                 }
                 rows.append(row)
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -251,6 +287,7 @@ def main() -> int:
             "tiles": len(pairs),
             "prompt_mode": args.prompt_mode,
             "min_area": args.min_area,
+            "boundary_tolerance": args.boundary_tolerance,
         }
     )
     summary_path.write_text(
