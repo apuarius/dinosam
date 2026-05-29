@@ -40,13 +40,6 @@ python scripts/smoke_dinov3_image.py
 python scripts/smoke_sam2_image.py
 ```
 
-## Bridge Experiments
-
-See `docs/bridge_experiments.md` for the first DINOv3/SAM2 data-flow experiments:
-
-- GT instance mask -> SAM2 oracle box/point prompt baseline
-- DINOv3 patch features -> feature-distance boundary maps
-
 ## Current External Versions
 
 ```bash
