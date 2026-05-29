@@ -1,0 +1,40 @@
+# DINOv3 patch 检测头训练配置。
+# 终端默认执行 `python scripts/train_dinov3_boundary_head.py` 会读取这个文件。
+
+data:
+  train_root: data/SAM2_dataset_1024_s512/Train
+  val_root: data/SAM2_dataset_1024_s512/Val
+  limit_train: null
+  limit_val: null
+
+model:
+  model_config: configs/model/dinov3_sam2.yaml
+
+output:
+  output_dir: outputs/dinov3_boundary_head
+
+train:
+  epochs: 100
+  batch_size: 16
+  num_workers: 2
+  lr: 0.001
+  weight_decay: 0.0001
+
+head:
+  hidden_channels: 256
+  dropout: 0.1
+
+loss:
+  boundary_loss_weight: 1.0
+  foreground_loss_weight: 0.5
+  max_pos_weight: 20.0
+
+target:
+  target_threshold: 0.05
+  gt_boundary_dilation: 4
+
+runtime:
+  seed: 42
+  cache_features: true
+  feature_cache_dir: null
+  device: null

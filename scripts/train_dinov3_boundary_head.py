@@ -5,7 +5,7 @@ import math
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = REPO_ROOT / "src"
@@ -39,6 +39,47 @@ from dinosam.models import (  # noqa: E402
 )
 from dinosam.project import resolve_project_path  # noqa: E402
 from dinosam.train import load_config  # noqa: E402
+
+
+DEFAULT_CONFIG_PATH = "configs/train/dinov3_boundary_head.yaml"
+
+
+DEFAULT_TRAINING_VALUES: dict[str, Any] = {
+    "train_root": "data/SAM2_dataset_1024_s512/Train",
+    "val_root": "data/SAM2_dataset_1024_s512/Val",
+    "model_config": "configs/model/dinov3_sam2.yaml",
+    "output_dir": "outputs/dinov3_boundary_head",
+    "epochs": 100,
+    "batch_size": 16,
+    "num_workers": 2,
+    "lr": 1e-3,
+    "weight_decay": 1e-4,
+    "hidden_channels": 256,
+    "dropout": 0.1,
+    "boundary_loss_weight": 1.0,
+    "foreground_loss_weight": 0.5,
+    "max_pos_weight": 20.0,
+    "target_threshold": 0.05,
+    "gt_boundary_dilation": 4,
+    "limit_train": None,
+    "limit_val": None,
+    "seed": 42,
+    "cache_features": True,
+    "feature_cache_dir": None,
+    "device": None,
+}
+
+
+CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
+    "data": ("train_root", "val_root", "limit_train", "limit_val"),
+    "model": ("model_config",),
+    "output": ("output_dir",),
+    "train": ("epochs", "batch_size", "num_workers", "lr", "weight_decay"),
+    "head": ("hidden_channels", "dropout"),
+    "loss": ("boundary_loss_weight", "foreground_loss_weight", "max_pos_weight"),
+    "target": ("target_threshold", "gt_boundary_dilation"),
+    "runtime": ("seed", "cache_features", "feature_cache_dir", "device"),
+}
 
 
 class InstanceTileDataset(Dataset):
@@ -127,29 +168,74 @@ class BinaryMetricAccumulator:
 def build_parser() -> argparse.ArgumentParser:
     """构建 DINOv3 patch 检测头训练脚本的命令行参数。"""
     parser = argparse.ArgumentParser(description="Train a small boundary head on frozen DINOv3 features.")
-    parser.add_argument("--train-root", default="data/SAM2_dataset_1024_s512/Train")
-    parser.add_argument("--val-root", default="data/SAM2_dataset_1024_s512/Val")
-    parser.add_argument("--model-config", default="configs/model/dinov3_sam2.yaml")
-    parser.add_argument("--output-dir", default="outputs/dinov3_boundary_head")
-    parser.add_argument("--epochs", type=int, default=20)
-    parser.add_argument("--batch-size", type=int, default=16)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--weight-decay", type=float, default=1e-4)
-    parser.add_argument("--hidden-channels", type=int, default=256)
-    parser.add_argument("--dropout", type=float, default=0.1)
-    parser.add_argument("--boundary-loss-weight", type=float, default=1.0)
-    parser.add_argument("--foreground-loss-weight", type=float, default=0.5)
-    parser.add_argument("--max-pos-weight", type=float, default=20.0)
-    parser.add_argument("--target-threshold", type=float, default=0.05)
-    parser.add_argument("--gt-boundary-dilation", type=int, default=4)
+    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--train-root", default=None)
+    parser.add_argument("--val-root", default=None)
+    parser.add_argument("--model-config", default=None)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch-size", type=int, default=None)
+    parser.add_argument("--num-workers", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--hidden-channels", type=int, default=None)
+    parser.add_argument("--dropout", type=float, default=None)
+    parser.add_argument("--boundary-loss-weight", type=float, default=None)
+    parser.add_argument("--foreground-loss-weight", type=float, default=None)
+    parser.add_argument("--max-pos-weight", type=float, default=None)
+    parser.add_argument("--target-threshold", type=float, default=None)
+    parser.add_argument("--gt-boundary-dilation", type=int, default=None)
     parser.add_argument("--limit-train", type=int, default=None)
     parser.add_argument("--limit-val", type=int, default=None)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--cache-features", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--cache-features", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--feature-cache-dir", default=None)
     parser.add_argument("--device", default=None)
     return parser
+
+
+def _update_from_section(values: dict[str, Any], section: Mapping[str, Any], keys: tuple[str, ...]) -> None:
+    """从配置文件的一个 section 中复制脚本支持的键。"""
+    for key in keys:
+        if key in section:
+            values[key] = section[key]
+
+
+def load_training_values(config_path: Path) -> dict[str, Any]:
+    """读取训练配置文件，并和脚本内置默认值合并。"""
+    values = dict(DEFAULT_TRAINING_VALUES)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Training config file does not exist: {config_path}")
+
+    config = load_config(config_path)
+    for key in DEFAULT_TRAINING_VALUES:
+        if key in config:
+            values[key] = config[key]
+
+    for section_name, keys in CONFIG_SECTIONS.items():
+        section = config.get(section_name, {})
+        if section is None:
+            continue
+        if not isinstance(section, Mapping):
+            raise TypeError(f"Training config section must be a mapping: {section_name}")
+        _update_from_section(values, section, keys)
+    return values
+
+
+def parse_training_args() -> argparse.Namespace:
+    """合并配置文件和命令行覆盖项，返回训练主流程使用的参数对象。"""
+    parser = build_parser()
+    cli_args = parser.parse_args()
+    config_path = resolve_project_path(cli_args.config)
+    values = load_training_values(config_path)
+
+    for key in DEFAULT_TRAINING_VALUES:
+        override = getattr(cli_args, key, None)
+        if override is not None:
+            values[key] = override
+
+    values["config"] = str(config_path)
+    return argparse.Namespace(**values)
 
 
 def collate_tiles(items: list[dict[str, Any]]) -> dict[str, Any]:
@@ -468,7 +554,7 @@ def prefixed_metrics(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
 
 def main() -> int:
     """训练 DINOv3 patch 检测头，并保存进度指标和最佳权重。"""
-    args = build_parser().parse_args()
+    args = parse_training_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -508,6 +594,7 @@ def main() -> int:
         shuffle=False,
     )
 
+    print(f"Config: {args.config}")
     print(f"Device: {device}")
     print(f"Train images: {len(train_loader.dataset)}")
     print(f"Val images: {len(val_loader.dataset)}")
