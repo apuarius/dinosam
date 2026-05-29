@@ -13,6 +13,7 @@ dependencies = [
     "pillow",
     "pyyaml",
     "safetensors",
+    "tqdm",
     "transformers>=4.56.0",
 ]
 

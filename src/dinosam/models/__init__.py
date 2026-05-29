@@ -4,6 +4,7 @@ from dinosam.models.config import (
     build_model_configs,
     build_sam2_config,
 )
+from dinosam.models.boundary_head import PatchDetectionHead, PatchDetectionHeadConfig
 from dinosam.models.dinov3_wrapper import DINOv3Config, DINOv3Features, DINOv3Wrapper
 from dinosam.models.fusion import BaseFusion, FeatureBundle, FusedFeatures
 from dinosam.models.sam2_wrapper import SAM2Config, SAM2ImageWrapper, SAM2Prediction
@@ -16,6 +17,8 @@ __all__ = [
     "FeatureBundle",
     "FusedFeatures",
     "ModelConfigs",
+    "PatchDetectionHead",
+    "PatchDetectionHeadConfig",
     "SAM2Config",
     "SAM2ImageWrapper",
     "SAM2Prediction",
