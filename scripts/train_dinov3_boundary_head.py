@@ -71,7 +71,7 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "device": None,
     "resume": True,
     "resume_checkpoint": None,
-    "visualize_every": 5,
+    "visualize_every": 25,
     "visualize_samples": 8,
 }
 
@@ -302,7 +302,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
-    parser.add_argument("--head-type", choices=("basic", "aspp", "v2"), default=None)
+    parser.add_argument("--head-type", choices=("basic", "aspp", "v2", "attention", "v3"), default=None)
     parser.add_argument("--hidden-channels", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--boundary-loss-weight", type=float, default=None)

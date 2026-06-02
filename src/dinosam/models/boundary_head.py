@@ -170,6 +170,94 @@ class ASPPBoundaryHead(nn.Module):
         foreground = self.foreground_branch(hidden)
         return torch.cat([boundary, foreground], dim=1)
 
+def _attention_heads(channels: int) -> int:
+    """为 patch self-attention 选择可整除通道数的注意力头数。"""
+    for heads in (8, 4, 2, 1):
+        if channels % heads == 0:
+            return heads
+    return 1
+
+
+class PatchSelfAttention(nn.Module):
+    """在 14x14 patch 网格上建模全局田块关系的轻量自注意力模块。"""
+
+    def __init__(self, channels: int, dropout: float) -> None:
+        super().__init__()
+        heads = _attention_heads(channels)
+        self.norm_attention = nn.LayerNorm(channels)
+        self.attention = nn.MultiheadAttention(
+            embed_dim=channels,
+            num_heads=heads,
+            dropout=dropout,
+            batch_first=True,
+        )
+        self.norm_ffn = nn.LayerNorm(channels)
+        self.ffn = nn.Sequential(
+            nn.Linear(channels, channels * 2),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(channels * 2, channels),
+            nn.Dropout(dropout),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """把 BCHW 特征展平成 token 序列做注意力，再恢复成 patch 网格。"""
+        batch, channels, height, width = features.shape
+        tokens = features.flatten(2).transpose(1, 2)
+        normalized = self.norm_attention(tokens)
+        attended, _ = self.attention(
+            normalized,
+            normalized,
+            normalized,
+            need_weights=False,
+        )
+        tokens = tokens + attended
+        tokens = tokens + self.ffn(self.norm_ffn(tokens))
+        return tokens.transpose(1, 2).reshape(batch, channels, height, width)
+
+
+class AttentionBoundaryHead(nn.Module):
+    """V3 检测头：在 V2 多尺度上下文后加入 patch self-attention。"""
+
+    def __init__(self, config: PatchDetectionHeadConfig) -> None:
+        super().__init__()
+        if config.output_channels != 2:
+            raise ValueError("AttentionBoundaryHead expects exactly 2 output channels.")
+
+        branch_channels = max(config.hidden_channels // 4, 32)
+        self.reduce = nn.Sequential(
+            nn.Conv2d(config.input_channels, config.hidden_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Dropout2d(config.dropout),
+        )
+        self.channel_attention = SqueezeExcitation(config.hidden_channels)
+        self.context = ASPPLite(
+            config.hidden_channels,
+            branch_channels=branch_channels,
+            dropout=config.dropout,
+        )
+        self.patch_attention = PatchSelfAttention(config.hidden_channels, dropout=config.dropout)
+        self.shared = ResidualConvBlock(config.hidden_channels, dropout=config.dropout)
+        self.boundary_branch = nn.Sequential(
+            ResidualConvBlock(config.hidden_channels, dropout=config.dropout),
+            nn.Conv2d(config.hidden_channels, 1, kernel_size=1),
+        )
+        self.foreground_branch = nn.Sequential(
+            ResidualConvBlock(config.hidden_channels, dropout=config.dropout),
+            nn.Conv2d(config.hidden_channels, 1, kernel_size=1),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        """返回 boundary 与 foreground 两个 logits 通道。"""
+        hidden = self.reduce(features)
+        hidden = self.channel_attention(hidden)
+        hidden = self.context(hidden)
+        hidden = self.patch_attention(hidden)
+        hidden = self.shared(hidden)
+        boundary = self.boundary_branch(hidden)
+        foreground = self.foreground_branch(hidden)
+        return torch.cat([boundary, foreground], dim=1)
+
 
 class PatchDetectionHead:
     """轻量 patch 检测头工厂，支持 V1 basic 和 V2 aspp 两种结构。"""
@@ -190,4 +278,6 @@ class PatchDetectionHead:
             )
         if head_type in {"aspp", "v2"}:
             return ASPPBoundaryHead(config)
+        if head_type in {"attention", "v3"}:
+            return AttentionBoundaryHead(config)
         raise ValueError(f"Unsupported patch detection head type: {config.head_type}")

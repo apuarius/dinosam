@@ -1,4 +1,4 @@
-# DINOv3 边界检测头 V2 训练配置：使用 ASPP 多尺度检测头。
+# DINOv3 边界检测头 V3 训练配置：使用 V2 + patch self-attention 检测头。
 data:  # 数据集路径与样本数量设置。
   train_root: data/SAM2_dataset_1024_s512/Train  # 训练集目录，内部应包含 Image/ 和 Instance/。
   val_root: data/SAM2_dataset_1024_s512/Val  # 验证集目录，内部应包含 Image/ 和 Instance/。
@@ -7,7 +7,7 @@ data:  # 数据集路径与样本数量设置。
 model:  # 模型权重和模型结构配置入口。
   model_config: configs/model/dinov3_sam2.yaml  # DINOv3 与 SAM2 的统一模型配置文件。
 output:  # 训练输出目录设置。
-  output_dir: outputs/dinov3_boundary_head_v2  # V2 checkpoint、指标、可视化和特征缓存输出目录。
+  output_dir: outputs/dinov3_boundary_head_v3  # V3 checkpoint、指标、可视化和特征缓存输出目录。
 train:  # 优化器和训练轮数设置。
   epochs: 200  # 总训练轮数；resume=true 时会从 last.pt 继续到该轮数。
   batch_size: 16  # 每个 batch 的图像数量。
@@ -15,7 +15,7 @@ train:  # 优化器和训练轮数设置。
   lr: 0.001  # AdamW 初始学习率。
   weight_decay: 0.0001  # AdamW 权重衰减，降低过拟合。
 head:  # 边界检测头结构设置。
-  head_type: aspp  # V2 使用 ASPP-lite 多尺度卷积检测头。
+  head_type: v3  # V3 使用 ASPP-lite 多尺度卷积加 patch self-attention。
   hidden_channels: 256  # 检测头内部隐藏通道数。
   dropout: 0.1  # 检测头 dropout 比例。
 loss:  # boundary 与 foreground 两个任务的损失权重。
