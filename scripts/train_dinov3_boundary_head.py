@@ -61,6 +61,7 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "foreground_loss_weight": 0.5,
     "max_pos_weight": 20.0,
     "target_threshold": 0.05,
+    "metric_threshold": "auto",
     "gt_boundary_dilation": 4,
     "limit_train": None,
     "limit_val": None,
@@ -82,7 +83,7 @@ CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
     "train": ("epochs", "batch_size", "num_workers", "lr", "weight_decay"),
     "head": ("head_type", "hidden_channels", "dropout"),
     "loss": ("boundary_loss_weight", "foreground_loss_weight", "max_pos_weight"),
-    "target": ("target_threshold", "gt_boundary_dilation"),
+    "target": ("target_threshold", "metric_threshold", "gt_boundary_dilation"),
     "runtime": (
         "seed",
         "cache_features",
@@ -122,9 +123,11 @@ class InstanceTileDataset(Dataset):
 class BinaryMetricAccumulator:
     """累积 patch 级二分类指标，支持进度条实时显示。"""
 
-    def __init__(self, target_threshold: float) -> None:
+    def __init__(self, target_threshold: float, metric_threshold: float | str) -> None:
         """初始化计数器和用于 AP/AUC 的分数缓存。"""
         self.target_threshold = target_threshold
+        self.metric_threshold = metric_threshold
+        self.fast_prediction_threshold = 0.5
         self.true_positive = 0.0
         self.false_positive = 0.0
         self.false_negative = 0.0
@@ -138,7 +141,7 @@ class BinaryMetricAccumulator:
         probabilities = torch.sigmoid(logits).detach().float().cpu().numpy()
         target_values = targets.detach().float().cpu().numpy()
         target_binary = target_values > self.target_threshold
-        prediction_binary = probabilities >= 0.5
+        prediction_binary = probabilities >= self.fast_prediction_threshold
 
         self.true_positive += float(np.logical_and(prediction_binary, target_binary).sum())
         self.false_positive += float(np.logical_and(prediction_binary, ~target_binary).sum())
@@ -149,7 +152,7 @@ class BinaryMetricAccumulator:
         self.targets.append(target_binary.reshape(-1))
 
     def compute_fast(self) -> dict[str, float]:
-        """计算无需排序的实时 precision、recall、F1 和 IoU。"""
+        """计算固定 0.5 阈值下的实时 precision、recall、F1 和 IoU。"""
         precision = self.true_positive / max(self.true_positive + self.false_positive, 1.0)
         recall = self.true_positive / max(self.true_positive + self.false_negative, 1.0)
         f1 = 2.0 * precision * recall / max(precision + recall, 1e-12)
@@ -162,8 +165,9 @@ class BinaryMetricAccumulator:
         }
 
     def compute(self) -> dict[str, float | None]:
-        """计算完整指标，包括 AP 和 ROC-AUC。"""
-        metrics: dict[str, float | None] = dict(self.compute_fast())
+        """计算完整指标，包括 AP、ROC-AUC 和可选自适应阈值 F1。"""
+        fixed_metrics = self.compute_fast()
+        metrics: dict[str, float | None] = dict(fixed_metrics)
         if not self.scores:
             metrics.update(
                 {
@@ -173,19 +177,26 @@ class BinaryMetricAccumulator:
                     "best_precision": None,
                     "best_recall": None,
                     "best_threshold": None,
+                    "selected_threshold": None,
                 }
             )
             return metrics
 
         scores = np.concatenate(self.scores)
         targets = np.concatenate(self.targets)
+        best_metrics = best_binary_f1(scores, targets)
         metrics.update(
             {
                 "ap": score_map_average_precision(scores, targets),
                 "auc": score_map_auc(scores, targets),
             }
         )
-        metrics.update(best_binary_f1(scores, targets))
+        metrics.update(best_metrics)
+        selected_threshold = resolve_metric_threshold(self.metric_threshold, best_metrics)
+        selected_metrics = binary_stats_at_threshold(scores, targets, selected_threshold)
+        metrics.update(selected_metrics)
+        metrics["selected_threshold"] = selected_threshold
+        metrics.update({f"fixed_{key}": value for key, value in fixed_metrics.items()})
         return metrics
 
 
@@ -219,6 +230,65 @@ def best_binary_f1(scores: np.ndarray, targets: np.ndarray) -> dict[str, float |
     }
 
 
+def parse_metric_threshold(value: Any) -> float | str:
+    """解析评估阈值配置，支持 auto 或 0-1 数值。"""
+    if value is None:
+        return "auto"
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text == "auto":
+            return "auto"
+        value = float(text)
+    threshold = float(value)
+    if threshold < 0.0 or threshold > 1.0:
+        raise ValueError(f"metric_threshold must be 'auto' or a value in [0, 1], got: {value}")
+    return threshold
+
+
+def resolve_metric_threshold(
+    metric_threshold: float | str,
+    best_metrics: Mapping[str, float | None],
+) -> float | None:
+    """把 auto 阈值解析成当前 epoch 搜索到的 best_threshold。"""
+    if metric_threshold == "auto":
+        value = best_metrics.get("best_threshold")
+        return None if value is None else float(value)
+    return float(metric_threshold)
+
+
+def binary_stats_at_threshold(
+    scores: np.ndarray,
+    targets: np.ndarray,
+    threshold: float | None,
+) -> dict[str, float | None]:
+    """按指定预测阈值计算 precision、recall、F1 和 IoU。"""
+    if threshold is None:
+        return {
+            "precision": None,
+            "recall": None,
+            "f1": None,
+            "iou": None,
+        }
+
+    flat_scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    flat_targets = np.asarray(targets, dtype=bool).reshape(-1)
+    prediction = flat_scores >= threshold
+    true_positive = float(np.logical_and(prediction, flat_targets).sum())
+    false_positive = float(np.logical_and(prediction, ~flat_targets).sum())
+    false_negative = float(np.logical_and(~prediction, flat_targets).sum())
+    union = float(np.logical_or(prediction, flat_targets).sum())
+    precision = true_positive / max(true_positive + false_positive, 1.0)
+    recall = true_positive / max(true_positive + false_negative, 1.0)
+    f1 = 2.0 * precision * recall / max(precision + recall, 1e-12)
+    iou = true_positive / max(union, 1.0)
+    return {
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "iou": iou,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建 DINOv3 patch 检测头训练脚本的命令行参数。"""
     parser = argparse.ArgumentParser(description="Train a small boundary head on frozen DINOv3 features.")
@@ -239,6 +309,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--foreground-loss-weight", type=float, default=None)
     parser.add_argument("--max-pos-weight", type=float, default=None)
     parser.add_argument("--target-threshold", type=float, default=None)
+    parser.add_argument("--metric-threshold", default=None, help="Use 'auto' or a fixed probability threshold.")
     parser.add_argument("--gt-boundary-dilation", type=int, default=None)
     parser.add_argument("--limit-train", type=int, default=None)
     parser.add_argument("--limit-val", type=int, default=None)
@@ -293,6 +364,7 @@ def parse_training_args() -> argparse.Namespace:
         if override is not None:
             values[key] = override
 
+    values["metric_threshold"] = parse_metric_threshold(values.get("metric_threshold"))
     values["config"] = str(config_path)
     return argparse.Namespace(**values)
 
@@ -606,8 +678,14 @@ def run_epoch(
     total_loss = 0.0
     total_boundary_loss = 0.0
     total_foreground_loss = 0.0
-    boundary_metrics = BinaryMetricAccumulator(target_threshold=args.target_threshold)
-    foreground_metrics = BinaryMetricAccumulator(target_threshold=args.target_threshold)
+    boundary_metrics = BinaryMetricAccumulator(
+        target_threshold=args.target_threshold,
+        metric_threshold=args.metric_threshold,
+    )
+    foreground_metrics = BinaryMetricAccumulator(
+        target_threshold=args.target_threshold,
+        metric_threshold=args.metric_threshold,
+    )
 
     bar = tqdm(loader, desc=f"{split} {epoch}/{epochs}", dynamic_ncols=True)
     for batch in bar:
@@ -662,8 +740,8 @@ def run_epoch(
         fast_foreground = foreground_metrics.compute_fast()
         bar.set_postfix(
             loss=format_metric(total_loss / max(total_images, 1)),
-            b_f1=format_metric(fast_boundary["f1"], digits=3),
-            fg_iou=format_metric(fast_foreground["iou"], digits=3),
+            b_f1_05=format_metric(fast_boundary["f1"], digits=3),
+            fg_iou_05=format_metric(fast_foreground["iou"], digits=3),
         )
 
     boundary = metric_prefix("boundary", boundary_metrics.compute())
@@ -838,6 +916,7 @@ def main() -> int:
     print(f"Train images: {len(train_loader.dataset)}")
     print(f"Val images: {len(val_loader.dataset)}")
     print(f"Head type: {args.head_type}")
+    print(f"Metric threshold: {args.metric_threshold}")
     print(f"Feature cache: {'on' if args.cache_features else 'off'} -> {cache_dir}")
     print(f"Output dir: {output_dir}")
 
