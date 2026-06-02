@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable
@@ -91,7 +92,7 @@ def head_config_from_state(
     state_dict: dict[str, torch.Tensor],
     checkpoint_args: dict[str, Any],
 ) -> PatchDetectionHeadConfig:
-    """从 checkpoint 权重形状恢复 V1/V2 检测头结构。"""
+    """从 checkpoint 权重形状恢复 V1/V2/V3 检测头结构。"""
     head_type = str(checkpoint_args.get("head_type", "basic")).lower()
     if "0.weight" in state_dict:
         first_weight = state_dict["0.weight"]
@@ -120,6 +121,19 @@ def load_boundary_head(checkpoint_path: Path, device: torch.device) -> tuple[tor
     head.load_state_dict(state_dict)
     head.eval()
     return head, dict(checkpoint.get("metrics", {}))
+
+
+def model_size_mb(model: torch.nn.Module) -> float:
+    """计算边界检测头参数和 buffer 占用的近似大小，单位 MB。"""
+    total_bytes = 0
+    for tensor in list(model.parameters()) + list(model.buffers()):
+        total_bytes += tensor.numel() * tensor.element_size()
+    return total_bytes / (1024 * 1024)
+
+
+def checkpoint_size_mb(path: Path) -> float:
+    """读取 checkpoint 文件大小，单位 MB。"""
+    return path.stat().st_size / (1024 * 1024)
 
 
 def connected_patch_components(mask: np.ndarray) -> list[list[tuple[int, int]]]:
@@ -342,6 +356,7 @@ def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
         "boundary_recall",
         "boundary_f1",
         "sam2_score",
+        "inference_sec",
     )
     for name in metric_names:
         values = [float(row[name]) for row in rows if row.get(name) not in (None, "")]
@@ -426,6 +441,8 @@ def main() -> int:
         raise RuntimeError("No validation tiles selected.")
 
     head, checkpoint_metrics = load_boundary_head(checkpoint_path, device=device)
+    head_model_size = model_size_mb(head)
+    checkpoint_size = checkpoint_size_mb(checkpoint_path)
     boundary_threshold = (
         float(args.boundary_threshold)
         if args.boundary_threshold is not None
@@ -443,6 +460,8 @@ def main() -> int:
     print(f"Feature cache: {'on' if cache_features else 'off'} -> {cache_dir}")
     print(f"Boundary threshold: {boundary_threshold:.4f}")
     print(f"Foreground threshold: {foreground_threshold:.4f}")
+    print(f"Head model size: {head_model_size:.2f} MB")
+    print(f"Checkpoint size: {checkpoint_size:.2f} MB")
     print(f"Output dir: {output_dir}")
 
     dinov3 = ensure_feature_source(
@@ -464,6 +483,7 @@ def main() -> int:
         instance_mask = load_instance_mask(pair.instance_path)
         target = instance_mask > 0
 
+        inference_start = time.perf_counter()
         boundary_probability, foreground_probability = predict_boundary_head(
             pair=pair,
             image=pil_image,
@@ -490,6 +510,7 @@ def main() -> int:
             prompt_mode=args.prompt_mode,
             multimask_output=args.multimask_output,
         )
+        inference_sec = time.perf_counter() - inference_start
 
         prediction_dir.mkdir(parents=True, exist_ok=True)
         Image.fromarray((prediction.astype(np.uint8) * 255)).save(prediction_dir / pair.name)
@@ -517,6 +538,7 @@ def main() -> int:
             "boundary_recall": boundary_stats["boundary_recall"],
             "boundary_f1": boundary_stats["boundary_f1"],
             "sam2_score": float(np.mean(sam2_scores)) if sam2_scores else None,
+            "inference_sec": inference_sec,
         }
         rows.append(row)
 
@@ -531,6 +553,8 @@ def main() -> int:
                 "foreground_threshold": foreground_threshold,
                 "prompt_mode": args.prompt_mode,
                 "max_prompts_per_image": args.max_prompts_per_image,
+                "head_model_size_mb": head_model_size,
+                "checkpoint_size_mb": checkpoint_size,
                 "summary": summary,
             },
             ensure_ascii=False,
