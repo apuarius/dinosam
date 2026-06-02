@@ -195,6 +195,7 @@ class BinaryMetricAccumulator:
         selected_threshold = resolve_metric_threshold(self.metric_threshold, best_metrics)
         selected_metrics = binary_stats_at_threshold(scores, targets, selected_threshold)
         metrics.update(selected_metrics)
+        metrics.update({f"selected_{key}": value for key, value in selected_metrics.items()})
         metrics["selected_threshold"] = selected_threshold
         metrics.update({f"fixed_{key}": value for key, value in fixed_metrics.items()})
         return metrics
@@ -687,7 +688,14 @@ def run_epoch(
         metric_threshold=args.metric_threshold,
     )
 
-    bar = tqdm(loader, desc=f"{split} {epoch}/{epochs}", dynamic_ncols=True)
+    bar = tqdm(
+        loader,
+        desc=f"{split} {epoch}/{epochs}",
+        ncols=88,
+        leave=False,
+        ascii=True,
+        bar_format="{l_bar}{bar:14}{r_bar}",
+    )
     for batch in bar:
         images = batch["images"]
         names = batch["names"]
@@ -739,9 +747,11 @@ def run_epoch(
         fast_boundary = boundary_metrics.compute_fast()
         fast_foreground = foreground_metrics.compute_fast()
         bar.set_postfix(
-            loss=format_metric(total_loss / max(total_images, 1)),
-            b_f1_05=format_metric(fast_boundary["f1"], digits=3),
-            fg_iou_05=format_metric(fast_foreground["iou"], digits=3),
+            {
+                "loss": format_metric(total_loss / max(total_images, 1), digits=3),
+                "bF1.5": format_metric(fast_boundary["f1"], digits=3),
+                "fgIoU.5": format_metric(fast_foreground["iou"], digits=3),
+            }
         )
 
     boundary = metric_prefix("boundary", boundary_metrics.compute())
@@ -868,6 +878,34 @@ def prefixed_metrics(prefix: str, values: dict[str, Any]) -> dict[str, Any]:
     return {f"{prefix}_{key}": value for key, value in values.items()}
 
 
+def print_metric_header() -> None:
+    """打印类似 YOLO 的紧凑指标表头。"""
+    print(" epoch   loss(train/val)   bP      bR      bF1     bAP     fgIoU   thr     save")
+    print("         b*=boundary best-threshold metrics, fgIoU=foreground selected-threshold")
+
+
+def print_epoch_summary(
+    *,
+    epoch: int,
+    epochs: int,
+    train_metrics: Mapping[str, Any],
+    val_metrics: Mapping[str, Any],
+    is_best: bool,
+) -> None:
+    """按固定列宽打印一行核心验证指标，避免终端输出过长。"""
+    print(
+        f"{epoch:>4}/{epochs:<4} "
+        f"{train_metrics['loss']:.4f}/{val_metrics['loss']:.4f}     "
+        f"{format_metric(val_metrics.get('boundary_best_precision'), digits=3):>6} "
+        f"{format_metric(val_metrics.get('boundary_best_recall'), digits=3):>6} "
+        f"{format_metric(val_metrics.get('boundary_best_f1'), digits=3):>6} "
+        f"{format_metric(val_metrics.get('boundary_ap'), digits=3):>6} "
+        f"{format_metric(val_metrics.get('foreground_selected_iou'), digits=3):>7} "
+        f"{format_metric(val_metrics.get('boundary_best_threshold'), digits=3):>6} "
+        f"{'*' if is_best else ''}"
+    )
+
+
 def main() -> int:
     """训练 DINOv3 patch 检测头，并保存进度指标和最佳权重。"""
     args = parse_training_args()
@@ -937,6 +975,7 @@ def main() -> int:
         return 0
 
     start_time = time.time()
+    print_metric_header()
     try:
         for epoch in range(start_epoch, args.epochs + 1):
             train_metrics = run_epoch(
@@ -994,7 +1033,8 @@ def main() -> int:
             )
 
             score = float(val_metrics.get("boundary_best_f1") or val_metrics.get("boundary_f1") or 0.0)
-            if score > best_metric:
+            is_best = score > best_metric
+            if is_best:
                 best_metric = score
                 save_checkpoint(
                     output_dir / "checkpoints" / "best.pt",
@@ -1005,16 +1045,12 @@ def main() -> int:
                     args=args,
                 )
 
-            print(
-                "Epoch "
-                f"{epoch}/{args.epochs} | "
-                f"train_loss={train_metrics['loss']:.4f} | "
-                f"val_loss={val_metrics['loss']:.4f} | "
-                f"val_boundary_f1={format_metric(val_metrics.get('boundary_f1'))} | "
-                f"val_boundary_best_f1={format_metric(val_metrics.get('boundary_best_f1'))} | "
-                f"val_boundary_best_thr={format_metric(val_metrics.get('boundary_best_threshold'))} | "
-                f"val_boundary_ap={format_metric(val_metrics.get('boundary_ap'))} | "
-                f"val_foreground_iou={format_metric(val_metrics.get('foreground_iou'))}"
+            print_epoch_summary(
+                epoch=epoch,
+                epochs=args.epochs,
+                train_metrics=train_metrics,
+                val_metrics=val_metrics,
+                is_best=is_best,
             )
     except KeyboardInterrupt:
         print()
