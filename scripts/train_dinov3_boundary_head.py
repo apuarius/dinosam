@@ -54,6 +54,7 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "num_workers": 2,
     "lr": 1e-3,
     "weight_decay": 1e-4,
+    "head_type": "basic",
     "hidden_channels": 256,
     "dropout": 0.1,
     "boundary_loss_weight": 1.0,
@@ -79,7 +80,7 @@ CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
     "model": ("model_config",),
     "output": ("output_dir",),
     "train": ("epochs", "batch_size", "num_workers", "lr", "weight_decay"),
-    "head": ("hidden_channels", "dropout"),
+    "head": ("head_type", "hidden_channels", "dropout"),
     "loss": ("boundary_loss_weight", "foreground_loss_weight", "max_pos_weight"),
     "target": ("target_threshold", "gt_boundary_dilation"),
     "runtime": (
@@ -231,6 +232,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
+    parser.add_argument("--head-type", choices=("basic", "aspp", "v2"), default=None)
     parser.add_argument("--hidden-channels", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--boundary-loss-weight", type=float, default=None)
@@ -811,6 +813,7 @@ def main() -> int:
             hidden_channels=args.hidden_channels,
             dropout=args.dropout,
             output_channels=2,
+            head_type=args.head_type,
         )
     ).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -834,6 +837,7 @@ def main() -> int:
     print(f"Device: {device}")
     print(f"Train images: {len(train_loader.dataset)}")
     print(f"Val images: {len(val_loader.dataset)}")
+    print(f"Head type: {args.head_type}")
     print(f"Feature cache: {'on' if args.cache_features else 'off'} -> {cache_dir}")
     print(f"Output dir: {output_dir}")
 

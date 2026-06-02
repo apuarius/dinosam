@@ -87,15 +87,26 @@ def checkpoint_metric(metrics: dict[str, Any], name: str, default: float) -> flo
     return float(value)
 
 
-def head_config_from_state(state_dict: dict[str, torch.Tensor], checkpoint_args: dict[str, Any]) -> PatchDetectionHeadConfig:
-    """从 checkpoint 权重形状恢复检测头结构，避免手动填写通道数。"""
-    first_weight = state_dict["0.weight"]
-    last_weight = state_dict["6.weight"]
+def head_config_from_state(
+    state_dict: dict[str, torch.Tensor],
+    checkpoint_args: dict[str, Any],
+) -> PatchDetectionHeadConfig:
+    """从 checkpoint 权重形状恢复 V1/V2 检测头结构。"""
+    head_type = str(checkpoint_args.get("head_type", "basic")).lower()
+    if "0.weight" in state_dict:
+        first_weight = state_dict["0.weight"]
+        last_weight = state_dict["6.weight"]
+        output_channels = int(last_weight.shape[0])
+        head_type = "basic"
+    else:
+        first_weight = state_dict["reduce.0.weight"]
+        output_channels = 2
     return PatchDetectionHeadConfig(
         input_channels=int(first_weight.shape[1]),
         hidden_channels=int(first_weight.shape[0]),
         dropout=float(checkpoint_args.get("dropout", 0.1)),
-        output_channels=int(last_weight.shape[0]),
+        output_channels=output_channels,
+        head_type=head_type,
     )
 
 
