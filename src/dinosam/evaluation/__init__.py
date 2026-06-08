@@ -8,11 +8,20 @@ from dinosam.evaluation.boundaries import (
     score_map_auc,
     score_map_metrics,
 )
+from dinosam.evaluation.instance_ap import (
+    PredictionInstance,
+    average_precision_at_iou,
+    binary_instances_from_label_mask,
+    mask_average_precision,
+)
 from dinosam.evaluation.masks import binary_mask_stats, first_binary_mask, mask_dice, mask_iou
 
 __all__ = [
+    "PredictionInstance",
+    "average_precision_at_iou",
     "best_f1_from_score_map",
     "binary_boundary_map",
+    "binary_instances_from_label_mask",
     "binary_mask_stats",
     "boundary_f1",
     "dilate_binary_mask",
@@ -20,6 +29,7 @@ __all__ = [
     "label_boundary_map",
     "mask_dice",
     "mask_iou",
+    "mask_average_precision",
     "score_map_average_precision",
     "score_map_auc",
     "score_map_metrics",

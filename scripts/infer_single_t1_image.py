@@ -24,7 +24,11 @@ from dinosam.data.instance_tiles import (  # noqa: E402
     load_instance_mask,
     load_rgb_image,
 )
-from dinosam.evaluation import binary_mask_stats, boundary_f1, mask_dice, mask_iou  # noqa: E402
+from dinosam.evaluation import (  # noqa: E402
+    PredictionInstance,
+    binary_instances_from_label_mask,
+    mask_average_precision,
+)
 from dinosam.models import SAM2ImageWrapper, build_sam2_config  # noqa: E402
 from dinosam.project import resolve_project_path  # noqa: E402
 from dinosam.train import load_config  # noqa: E402
@@ -56,8 +60,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-proposal-area", type=int, default=512)
     parser.add_argument("--box-margin", type=int, default=4)
     parser.add_argument("--positive-points-per-prompt", type=int, default=1)
-    parser.add_argument("--negative-points-per-prompt", type=int, default=4)
-    parser.add_argument("--negative-ring-radius", type=int, default=2)
     parser.add_argument("--prompt-mode", choices=("box", "point", "box_point"), default="box_point")
     parser.add_argument("--boundary-threshold", type=float, default=None)
     parser.add_argument("--foreground-threshold", type=float, default=None)
@@ -117,21 +119,17 @@ def save_panel(
     canvas.save(output_path)
 
 
-def build_metrics(prediction: np.ndarray, target: np.ndarray | None) -> dict[str, float] | None:
-    if target is None:
+def build_metrics(
+    prediction_instances: list[PredictionInstance],
+    target_instance_mask: np.ndarray | None,
+    latency_ms: float,
+) -> dict[str, float] | None:
+    if target_instance_mask is None:
         return None
-    mask_stats = binary_mask_stats(prediction, target)
-    boundary_stats = boundary_f1(prediction, target)
-    return {
-        "iou": mask_iou(prediction, target),
-        "dice": mask_dice(prediction, target),
-        "precision": mask_stats["precision"],
-        "recall": mask_stats["recall"],
-        "f1": mask_stats["f1"],
-        "boundary_precision": boundary_stats["boundary_precision"],
-        "boundary_recall": boundary_stats["boundary_recall"],
-        "boundary_f1": boundary_stats["boundary_f1"],
-    }
+    target_instances = binary_instances_from_label_mask(target_instance_mask)
+    metrics = mask_average_precision([prediction_instances], [target_instances])
+    metrics["Latency (ms)"] = latency_ms
+    return metrics
 
 
 def main() -> int:
@@ -194,7 +192,8 @@ def main() -> int:
 
     pil_image = Image.open(pair.image_path).convert("RGB")
     image = load_rgb_image(pair.image_path)
-    target = load_instance_mask(pair.instance_path) > 0 if has_target else None
+    target_instance_mask = load_instance_mask(pair.instance_path) if has_target else None
+    target = target_instance_mask > 0 if target_instance_mask is not None else None
 
     inference_start = time.perf_counter()
     boundary_probability, foreground_probability = predict_boundary_head(
@@ -217,10 +216,8 @@ def main() -> int:
         box_margin=args.box_margin,
         max_prompts=args.max_prompts_per_image,
         positive_points_per_prompt=args.positive_points_per_prompt,
-        negative_points_per_prompt=args.negative_points_per_prompt,
-        negative_ring_radius=args.negative_ring_radius,
     )
-    prediction, sam2_scores = run_sam2_prompts(
+    prediction, _, prediction_instances = run_sam2_prompts(
         sam2=sam2,
         image=image,
         prompts=prompts,
@@ -228,6 +225,7 @@ def main() -> int:
         multimask_output=args.multimask_output,
     )
     inference_sec = time.perf_counter() - inference_start
+    latency_ms = inference_sec * 1000.0
 
     output_dir.mkdir(parents=True, exist_ok=True)
     stem = pair.image_path.stem
@@ -246,8 +244,8 @@ def main() -> int:
     save_probability_map(boundary_probability, pil_image.size, boundary_path)
     save_probability_map(foreground_probability, pil_image.size, foreground_path)
 
-    positive_points, negative_points, total_points = prompt_point_counts(prompts)
-    metrics = build_metrics(prediction, target)
+    positive_points, total_points = prompt_point_counts(prompts)
+    metrics = build_metrics(prediction_instances, target_instance_mask, latency_ms)
     summary = {
         "image": str(pair.image_path),
         "mask": str(pair.instance_path) if has_target else None,
@@ -258,10 +256,8 @@ def main() -> int:
         "prompt_mode": args.prompt_mode,
         "prompts": len(prompts),
         "positive_points": positive_points,
-        "negative_points": negative_points,
         "points": total_points,
-        "sam2_score": float(np.mean(sam2_scores)) if sam2_scores else None,
-        "inference_sec": inference_sec,
+        "Latency (ms)": latency_ms,
         "prediction_pixels": int(prediction.sum()),
         "metrics": metrics,
         "outputs": {
@@ -276,14 +272,16 @@ def main() -> int:
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     print(f"Prompts: {len(prompts)}")
-    print(f"Points: +{positive_points} / -{negative_points}")
+    print(f"Positive points: {positive_points}")
     if metrics is not None:
         print(
             "Metrics: "
-            f"IoU={metrics['iou']:.4f}, Dice={metrics['dice']:.4f}, "
-            f"BoundaryF1={metrics['boundary_f1']:.4f}"
+            f"mAP@0.5={metrics['mAP@0.5']:.4f}, "
+            f"mAP@0.5:0.95={metrics['mAP@0.5:0.95']:.4f}, "
+            f"Latency={metrics['Latency (ms)']:.2f} ms"
         )
-    print(f"Inference sec: {inference_sec:.3f}")
+    else:
+        print(f"Latency: {latency_ms:.2f} ms")
     print(f"Saved mask: {mask_path}")
     print(f"Saved panel: {panel_path}")
     print(f"Saved summary: {summary_path}")

@@ -1,4 +1,4 @@
-# T1 训练配置：DINOv3 frozen features + attention boundary/foreground head + SAM2 正负点 prompt。
+# T1 训练配置：DINOv3 frozen features + attention boundary/foreground head + SAM2 box/正点 prompt。
 # 终端默认执行 `python scripts/train_dinov3_boundary_head.py` 会读取这个文件。
 
 data:

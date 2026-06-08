@@ -19,7 +19,11 @@ from PIL import Image  # noqa: E402
 from tqdm.auto import tqdm  # noqa: E402
 
 from dinosam.data.instance_tiles import list_instance_tile_pairs, load_instance_mask, load_rgb_image  # noqa: E402
-from dinosam.evaluation import binary_mask_stats, boundary_f1, mask_dice, mask_iou  # noqa: E402
+from dinosam.evaluation import (  # noqa: E402
+    PredictionInstance,
+    binary_instances_from_label_mask,
+    mask_average_precision,
+)
 from dinosam.models import DINOv3Wrapper, SAM2ImageWrapper, build_dinov3_config, build_sam2_config  # noqa: E402
 from dinosam.project import resolve_project_path  # noqa: E402
 from dinosam.train import load_config  # noqa: E402
@@ -34,7 +38,7 @@ from run_boundary_head_sam2_prompts import (  # noqa: E402
     load_training_values,
     model_size_mb,
     run_sam2_prompts,
-    summarize_rows,
+    summarize_instance_results,
     write_metrics_csv,
 )
 
@@ -63,16 +67,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--foreground-thresholds", default="0.05,0.06")
     parser.add_argument("--max-prompts", default="56,72")
     parser.add_argument("--positive-points", default="1")
-    parser.add_argument("--negative-points", default="0,4")
-    parser.add_argument("--negative-ring-radii", default="2")
     parser.add_argument("--min-proposal-area", type=int, default=512)
     parser.add_argument("--prompt-mode", choices=("box", "point", "box_point"), default="box_point")
     parser.add_argument("--multimask-output", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--device", default=None)
     parser.add_argument("--cache-features", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--feature-cache-dir", default=None)
-    parser.add_argument("--sort-by", default="mean_iou")
-    parser.add_argument("--min-precision", type=float, default=0.0)
+    parser.add_argument("--sort-by", default="mAP@0.5")
     return parser
 
 
@@ -120,7 +121,8 @@ def prepare_probability_cache(
     for pair in tqdm(pairs, desc="precompute maps", dynamic_ncols=True):
         pil_image = Image.open(pair.image_path).convert("RGB")
         image = load_rgb_image(pair.image_path)
-        target = load_instance_mask(pair.instance_path) > 0
+        target_instances = binary_instances_from_label_mask(load_instance_mask(pair.instance_path))
+        head_start = time.perf_counter()
         if dinov3 is None:
             feature_path = feature_cache_paths(cache_dir, split_name, [pair.name])[0]
             features = torch.load(feature_path, map_location=device).float()[None, ...]
@@ -137,13 +139,15 @@ def prepare_probability_cache(
 
         with torch.no_grad():
             probabilities = torch.sigmoid(head(features.to(device))).detach().float().cpu().numpy()[0]
+        head_latency_ms = (time.perf_counter() - head_start) * 1000.0
         items.append(
             {
                 "name": pair.name,
                 "image": image,
-                "target": target,
+                "target_instances": target_instances,
                 "boundary_probability": probabilities[0],
                 "foreground_probability": probabilities[1],
+                "head_latency_ms": head_latency_ms,
             }
         )
     return items, head, checkpoint_metrics
@@ -158,18 +162,20 @@ def evaluate_combo(
     foreground_threshold: float,
     max_prompts: int,
     positive_points_per_prompt: int,
-    negative_points_per_prompt: int,
-    negative_ring_radius: int,
     min_proposal_area: int,
     prompt_mode: str,
     multimask_output: bool,
 ) -> dict[str, Any]:
     """在固定样本集上评估一组 prompt 参数。"""
     rows: list[dict[str, Any]] = []
+    predictions_by_image: list[list[PredictionInstance]] = []
+    targets_by_image: list[list[np.ndarray]] = []
+    latency_ms_values: list[float] = []
     start = time.perf_counter()
     for item in items:
         image = item["image"]
-        target = item["target"]
+        target_instances = item["target_instances"]
+        image_start = time.perf_counter()
         prompts = build_auto_prompts(
             boundary_probability=item["boundary_probability"],
             foreground_probability=item["foreground_probability"],
@@ -180,47 +186,39 @@ def evaluate_combo(
             box_margin=box_margin,
             max_prompts=max_prompts,
             positive_points_per_prompt=positive_points_per_prompt,
-            negative_points_per_prompt=negative_points_per_prompt,
-            negative_ring_radius=negative_ring_radius,
         )
-        image_start = time.perf_counter()
-        prediction, sam2_scores = run_sam2_prompts(
+        _, _, prediction_instances = run_sam2_prompts(
             sam2=sam2,
             image=image,
             prompts=prompts,
             prompt_mode=prompt_mode,
             multimask_output=multimask_output,
         )
-        inference_sec = time.perf_counter() - image_start
-        mask_stats = binary_mask_stats(prediction, target)
-        boundary_stats = boundary_f1(prediction, target)
+        prompt_sam2_latency_ms = (time.perf_counter() - image_start) * 1000.0
+        latency_ms = float(item["head_latency_ms"]) + prompt_sam2_latency_ms
+        image_metrics = mask_average_precision([prediction_instances], [target_instances])
         rows.append(
             {
                 "tile": item["name"],
                 "prompts": len(prompts),
                 "positive_points": sum(int((np.asarray(prompt.point_labels) == 1).sum()) for prompt in prompts),
-                "negative_points": sum(int((np.asarray(prompt.point_labels) == 0).sum()) for prompt in prompts),
                 "points": sum(int(len(prompt.point_labels)) for prompt in prompts),
-                "iou": mask_iou(prediction, target),
-                "dice": mask_dice(prediction, target),
-                "precision": mask_stats["precision"],
-                "recall": mask_stats["recall"],
-                "f1": mask_stats["f1"],
-                "boundary_precision": boundary_stats["boundary_precision"],
-                "boundary_recall": boundary_stats["boundary_recall"],
-                "boundary_f1": boundary_stats["boundary_f1"],
-                "sam2_score": float(np.mean(sam2_scores)) if sam2_scores else None,
-                "inference_sec": inference_sec,
+                "mAP@0.5": image_metrics["mAP@0.5"],
+                "mAP@0.5:0.95": image_metrics["mAP@0.5:0.95"],
+                "Latency (ms)": latency_ms,
             }
         )
+        predictions_by_image.append(prediction_instances)
+        targets_by_image.append(target_instances)
+        latency_ms_values.append(latency_ms)
 
-    summary = summarize_rows(rows)
+    summary = summarize_instance_results(predictions_by_image, targets_by_image, latency_ms_values)
     total_sec = time.perf_counter() - start
     return {
         "rows": rows,
         "summary": summary,
         "total_inference_sec": total_sec,
-        "mean_inference_sec": total_sec / max(len(items), 1),
+        "mean_latency_ms": float(np.mean(latency_ms_values)) if latency_ms_values else 0.0,
         "mean_prompts": mean_or_none([float(row["prompts"]) for row in rows]),
     }
 
@@ -277,8 +275,6 @@ def main() -> int:
             parse_float_list(args.foreground_thresholds),
             parse_int_list(args.max_prompts),
             parse_int_list(args.positive_points),
-            parse_int_list(args.negative_points),
-            parse_int_list(args.negative_ring_radii),
         )
     )
     print(f"Checkpoint: {checkpoint_path}")
@@ -296,8 +292,6 @@ def main() -> int:
         foreground_threshold,
         max_prompts,
         positive_points,
-        negative_points,
-        negative_ring_radius,
     ) in tqdm(
         grid,
         desc="sweep params",
@@ -311,8 +305,6 @@ def main() -> int:
             foreground_threshold=foreground_threshold,
             max_prompts=max_prompts,
             positive_points_per_prompt=positive_points,
-            negative_points_per_prompt=negative_points,
-            negative_ring_radius=negative_ring_radius,
             min_proposal_area=args.min_proposal_area,
             prompt_mode=args.prompt_mode,
             multimask_output=args.multimask_output,
@@ -324,25 +316,21 @@ def main() -> int:
             "foreground_threshold": foreground_threshold,
             "max_prompts_per_image": max_prompts,
             "positive_points_per_prompt": positive_points,
-            "negative_points_per_prompt": negative_points,
-            "negative_ring_radius": negative_ring_radius,
             "images": len(items),
             "mean_prompts": result["mean_prompts"],
             "total_inference_sec": result["total_inference_sec"],
-            "mean_inference_sec": result["mean_inference_sec"],
+            "mean_latency_ms": result["mean_latency_ms"],
             "head_model_size_mb": head_size,
             "checkpoint_size_mb": ckpt_size,
         }
         row.update(summary)
-        precision = float(row.get("mean_precision") or 0.0)
-        row["valid_by_precision"] = precision >= args.min_precision
-        row["rank_score"] = float(row.get(args.sort_by) or -1.0) if row["valid_by_precision"] else -1.0
+        row["rank_score"] = float(row.get(args.sort_by) or -1.0)
         result_rows.append(row)
 
     result_rows.sort(
         key=lambda row: (
             float(row.get("rank_score") or -1.0),
-            float(row.get("mean_boundary_f1") or -1.0),
+            -float(row.get("Latency (ms)") or 1e12),
         ),
         reverse=True,
     )
@@ -357,7 +345,6 @@ def main() -> int:
                 "split_name": split_name,
                 "grid_size": len(grid),
                 "sort_by": args.sort_by,
-                "min_precision": args.min_precision,
                 "head_model_size_mb": head_size,
                 "checkpoint_size_mb": ckpt_size,
                 "best": result_rows[0] if result_rows else None,
@@ -377,14 +364,9 @@ def main() -> int:
             "foreground_threshold",
             "max_prompts_per_image",
             "positive_points_per_prompt",
-            "negative_points_per_prompt",
-            "negative_ring_radius",
-            "mean_iou",
-            "mean_dice",
-            "mean_boundary_f1",
-            "mean_positive_points",
-            "mean_negative_points",
-            "mean_inference_sec",
+            "mAP@0.5",
+            "mAP@0.5:0.95",
+            "Latency (ms)",
             "head_model_size_mb",
             "checkpoint_size_mb",
         ):

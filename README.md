@@ -58,7 +58,7 @@ can pair with `data/masks/train/tile_001.png`.
 
 T1 is the current experiment line. It uses frozen DINOv3 satellite features, the
 attention boundary/foreground head, train-only online augmentation, and SAM2
-box/positive/negative prompts. Earlier V1/V2 configs are kept for reference but
+box/positive-point prompts. Earlier V1/V2 configs are kept for reference but
 are not the active training target.
 
 ## Train T1
@@ -99,7 +99,15 @@ python scripts/infer_single_t1_image.py \
 ```
 
 Use `--image path/to/image.png` for a specific image. Add `--mask path/to/mask.png`
-when ground truth is available and metrics should be reported.
+when ground truth is available. Final evaluation reports only:
+
+```text
+mAP@0.5
+mAP@0.5:0.95
+Latency (ms)
+```
+
+SAM2 prompts use boxes and positive points only.
 
 ## Current External Versions
 

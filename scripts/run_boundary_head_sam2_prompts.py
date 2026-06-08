@@ -23,7 +23,12 @@ from dinosam.data.instance_tiles import (  # noqa: E402
     load_instance_mask,
     load_rgb_image,
 )
-from dinosam.evaluation import binary_mask_stats, boundary_f1, first_binary_mask, mask_dice, mask_iou  # noqa: E402
+from dinosam.evaluation import (  # noqa: E402
+    PredictionInstance,
+    binary_instances_from_label_mask,
+    first_binary_mask,
+    mask_average_precision,
+)
 from dinosam.models import (  # noqa: E402
     DINOv3Wrapper,
     PatchDetectionHead,
@@ -65,8 +70,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-proposal-area", type=int, default=512)
     parser.add_argument("--box-margin", type=int, default=4)
     parser.add_argument("--positive-points-per-prompt", type=int, default=1)
-    parser.add_argument("--negative-points-per-prompt", type=int, default=4)
-    parser.add_argument("--negative-ring-radius", type=int, default=2)
     parser.add_argument("--prompt-mode", choices=("box", "point", "box_point"), default="box_point")
     parser.add_argument("--boundary-threshold", type=float, default=None)
     parser.add_argument("--foreground-threshold", type=float, default=None)
@@ -188,33 +191,6 @@ def component_to_pixel_mask(
     return mask
 
 
-def component_to_patch_mask(
-    component: Iterable[tuple[int, int]],
-    grid_shape: tuple[int, int],
-) -> np.ndarray:
-    """把 patch 连通块转成 patch 网格二值图。"""
-    mask = np.zeros(grid_shape, dtype=bool)
-    for patch_y, patch_x in component:
-        if 0 <= patch_y < grid_shape[0] and 0 <= patch_x < grid_shape[1]:
-            mask[patch_y, patch_x] = True
-    return mask
-
-
-def dilate_patch_mask(mask: np.ndarray, radius: int) -> np.ndarray:
-    """在 patch 网格上做简单 Chebyshev 邻域膨胀。"""
-    if radius <= 0:
-        return mask.copy()
-    height, width = mask.shape
-    padded = np.pad(mask, radius, mode="constant", constant_values=False)
-    dilated = np.zeros_like(mask, dtype=bool)
-    for dy in range(-radius, radius + 1):
-        for dx in range(-radius, radius + 1):
-            source_y = radius + dy
-            source_x = radius + dx
-            dilated |= padded[source_y : source_y + height, source_x : source_x + width]
-    return dilated
-
-
 def patch_center_to_pixel(
     patch_y: int,
     patch_x: int,
@@ -295,37 +271,6 @@ def positive_points_from_component(
     )
 
 
-def negative_points_from_component(
-    component: list[tuple[int, int]],
-    *,
-    boundary_probability: np.ndarray,
-    foreground_probability: np.ndarray,
-    image_shape: tuple[int, int],
-    max_points: int,
-    ring_radius: int,
-) -> np.ndarray:
-    """在 proposal 外环挑高前景/高边界负点，抑制相邻田块粘连。"""
-    grid_shape = tuple(int(value) for value in foreground_probability.shape)
-    component_mask = component_to_patch_mask(component, grid_shape)
-    ring_mask = dilate_patch_mask(component_mask, radius=ring_radius) & ~component_mask
-    ys, xs = np.nonzero(ring_mask)
-    candidates = [
-        (
-            float(0.6 * foreground_probability[y, x] + 0.4 * boundary_probability[y, x]),
-            int(y),
-            int(x),
-        )
-        for y, x in zip(ys, xs, strict=True)
-    ]
-    return select_spaced_patch_points(
-        candidates,
-        max_points=max_points,
-        grid_shape=grid_shape,
-        image_shape=image_shape,
-        min_patch_distance=1.5,
-    )
-
-
 def prompt_from_component(
     *,
     component: list[tuple[int, int]],
@@ -335,10 +280,8 @@ def prompt_from_component(
     boundary_probability: np.ndarray,
     foreground_probability: np.ndarray,
     positive_points_per_prompt: int,
-    negative_points_per_prompt: int,
-    negative_ring_radius: int,
 ) -> InstancePrompt:
-    """把一个 patch proposal 转成 box 加规则式正负点 prompt。"""
+    """把一个 patch proposal 转成 box 加规则式正点 prompt。"""
     base_prompt = prompt_from_binary_mask(
         pixel_mask,
         instance_id=instance_id,
@@ -354,28 +297,11 @@ def prompt_from_component(
     if positive_points_per_prompt > 0 and len(positive_points) == 0:
         positive_points = base_prompt.point_coords
 
-    negative_points = negative_points_from_component(
-        component,
-        boundary_probability=boundary_probability,
-        foreground_probability=foreground_probability,
-        image_shape=pixel_mask.shape,
-        max_points=max(negative_points_per_prompt, 0),
-        ring_radius=max(negative_ring_radius, 0),
-    )
-
-    point_coords = np.concatenate([positive_points, negative_points], axis=0)
-    point_labels = np.concatenate(
-        [
-            np.ones(len(positive_points), dtype=np.int32),
-            np.zeros(len(negative_points), dtype=np.int32),
-        ],
-        axis=0,
-    )
     return InstancePrompt(
         instance_id=instance_id,
         box=base_prompt.box,
-        point_coords=point_coords.astype(np.float32, copy=False),
-        point_labels=point_labels,
+        point_coords=positive_points.astype(np.float32, copy=False),
+        point_labels=np.ones(len(positive_points), dtype=np.int32),
         area=base_prompt.area,
     )
 
@@ -404,10 +330,8 @@ def build_auto_prompts(
     box_margin: int,
     max_prompts: int,
     positive_points_per_prompt: int = 1,
-    negative_points_per_prompt: int = 4,
-    negative_ring_radius: int = 2,
 ) -> list[InstancePrompt]:
-    """把边界头输出转换成一组粗 box/正点/负点 prompts。"""
+    """把边界头输出转换成一组粗 box/正点 prompts。"""
     candidate = (foreground_probability >= foreground_threshold) & (
         boundary_probability < boundary_threshold
     )
@@ -446,8 +370,6 @@ def build_auto_prompts(
                 boundary_probability=boundary_probability,
                 foreground_probability=foreground_probability,
                 positive_points_per_prompt=positive_points_per_prompt,
-                negative_points_per_prompt=negative_points_per_prompt,
-                negative_ring_radius=negative_ring_radius,
             )
         )
         if len(prompts) >= max_prompts:
@@ -472,31 +394,31 @@ def run_sam2_prompts(
     prompts: list[InstancePrompt],
     prompt_mode: str,
     multimask_output: bool,
-) -> tuple[np.ndarray, list[float]]:
+) -> tuple[np.ndarray, list[float], list[PredictionInstance]]:
     """对一张图的所有自动 prompt 逐个调用 SAM2，并合并成前景 mask。"""
     sam2.set_image(image)
     union_mask = np.zeros(image.shape[:2], dtype=bool)
     scores: list[float] = []
+    instances: list[PredictionInstance] = []
     for prompt in prompts:
         kwargs = build_sam2_prompt_kwargs(prompt, prompt_mode)  # type: ignore[arg-type]
         prediction = sam2.predict(**kwargs, multimask_output=multimask_output)
         mask, score = select_sam2_mask(prediction)
         union_mask |= mask
-        if score is not None:
-            scores.append(score)
+        score_value = float(score) if score is not None else 1.0
+        scores.append(score_value)
+        instances.append((mask, score_value))
     sam2.reset()
-    return union_mask, scores
+    return union_mask, scores, instances
 
 
-def prompt_point_counts(prompts: list[InstancePrompt]) -> tuple[int, int, int]:
-    """统计 prompt 中正点、负点和总点数。"""
+def prompt_point_counts(prompts: list[InstancePrompt]) -> tuple[int, int]:
+    """统计 prompt 中正点和总点数。"""
     positive = 0
-    negative = 0
     for prompt in prompts:
         labels = np.asarray(prompt.point_labels)
         positive += int((labels == 1).sum())
-        negative += int((labels == 0).sum())
-    return positive, negative, positive + negative
+    return positive, positive
 
 
 def blend_mask(image: np.ndarray, mask: np.ndarray, color: tuple[int, int, int]) -> Image.Image:
@@ -508,18 +430,17 @@ def blend_mask(image: np.ndarray, mask: np.ndarray, color: tuple[int, int, int])
 
 
 def draw_prompts(image: np.ndarray, prompts: list[InstancePrompt]) -> Image.Image:
-    """把自动生成的 box、正点和负点画到原图上。"""
+    """把自动生成的 box 和正点画到原图上。"""
     canvas = Image.fromarray(image).convert("RGB")
     draw = ImageDraw.Draw(canvas)
     for prompt in prompts:
         box = [float(value) for value in prompt.box]
         draw.rectangle(box, outline=(0, 255, 160), width=3)
-        for (x, y), label in zip(prompt.point_coords, prompt.point_labels, strict=True):
+        for x, y in prompt.point_coords:
             radius = 4
-            fill = (255, 220, 0) if int(label) == 1 else (255, 48, 64)
             draw.ellipse(
                 [float(x) - radius, float(y) - radius, float(x) + radius, float(y) + radius],
-                fill=fill,
+                fill=(255, 220, 0),
                 outline=(0, 0, 0),
             )
     return canvas
@@ -560,28 +481,14 @@ def write_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         writer.writerows(rows)
 
 
-def summarize_rows(rows: list[dict[str, Any]]) -> dict[str, float]:
-    """汇总平均指标，只作为打通链路阶段的粗略参考。"""
-    summary: dict[str, float] = {}
-    metric_names = (
-        "iou",
-        "dice",
-        "precision",
-        "recall",
-        "f1",
-        "boundary_precision",
-        "boundary_recall",
-        "boundary_f1",
-        "sam2_score",
-        "inference_sec",
-        "positive_points",
-        "negative_points",
-        "points",
-    )
-    for name in metric_names:
-        values = [float(row[name]) for row in rows if row.get(name) not in (None, "")]
-        if values:
-            summary[f"mean_{name}"] = float(np.mean(values))
+def summarize_instance_results(
+    predictions_by_image: list[list[PredictionInstance]],
+    targets_by_image: list[list[np.ndarray]],
+    latency_ms: list[float],
+) -> dict[str, float]:
+    """按论文表格口径汇总实例分割 mAP 和平均延迟。"""
+    summary = mask_average_precision(predictions_by_image, targets_by_image)
+    summary["Latency (ms)"] = float(np.mean(latency_ms)) if latency_ms else 0.0
     return summary
 
 
@@ -686,8 +593,6 @@ def main() -> int:
     print(f"Boundary threshold: {boundary_threshold:.4f}")
     print(f"Foreground threshold: {foreground_threshold:.4f}")
     print(f"Positive points / prompt: {args.positive_points_per_prompt}")
-    print(f"Negative points / prompt: {args.negative_points_per_prompt}")
-    print(f"Negative ring radius: {args.negative_ring_radius}")
     print(f"Head model size: {head_model_size:.2f} MB")
     print(f"Checkpoint size: {checkpoint_size:.2f} MB")
     print(f"Output dir: {output_dir}")
@@ -704,6 +609,9 @@ def main() -> int:
     sam2 = SAM2ImageWrapper.from_config(sam2_config)
 
     rows: list[dict[str, Any]] = []
+    predictions_by_image: list[list[PredictionInstance]] = []
+    targets_by_image: list[list[np.ndarray]] = []
+    latency_ms_values: list[float] = []
     prediction_dir = output_dir / "predictions"
     visualization_dir = output_dir / "visualizations"
     for pair in tqdm(pairs, desc="auto prompts", dynamic_ncols=True):
@@ -711,6 +619,7 @@ def main() -> int:
         image = load_rgb_image(pair.image_path)
         instance_mask = load_instance_mask(pair.instance_path)
         target = instance_mask > 0
+        target_instances = binary_instances_from_label_mask(instance_mask)
 
         inference_start = time.perf_counter()
         boundary_probability, foreground_probability = predict_boundary_head(
@@ -733,10 +642,8 @@ def main() -> int:
             box_margin=args.box_margin,
             max_prompts=args.max_prompts_per_image,
             positive_points_per_prompt=args.positive_points_per_prompt,
-            negative_points_per_prompt=args.negative_points_per_prompt,
-            negative_ring_radius=args.negative_ring_radius,
         )
-        prediction, sam2_scores = run_sam2_prompts(
+        prediction, _, prediction_instances = run_sam2_prompts(
             sam2=sam2,
             image=image,
             prompts=prompts,
@@ -744,6 +651,7 @@ def main() -> int:
             multimask_output=args.multimask_output,
         )
         inference_sec = time.perf_counter() - inference_start
+        latency_ms = inference_sec * 1000.0
 
         prediction_dir.mkdir(parents=True, exist_ok=True)
         Image.fromarray((prediction.astype(np.uint8) * 255)).save(prediction_dir / pair.name)
@@ -755,31 +663,23 @@ def main() -> int:
             output_path=visualization_dir / pair.name,
         )
 
-        mask_stats = binary_mask_stats(prediction, target)
-        boundary_stats = boundary_f1(prediction, target)
-        positive_points, negative_points, total_points = prompt_point_counts(prompts)
+        image_metrics = mask_average_precision([prediction_instances], [target_instances])
+        positive_points, total_points = prompt_point_counts(prompts)
         row = {
             "tile": pair.name,
             "prompts": len(prompts),
             "positive_points": positive_points,
-            "negative_points": negative_points,
             "points": total_points,
-            "prediction_pixels": int(prediction.sum()),
-            "target_pixels": int(target.sum()),
-            "iou": mask_iou(prediction, target),
-            "dice": mask_dice(prediction, target),
-            "precision": mask_stats["precision"],
-            "recall": mask_stats["recall"],
-            "f1": mask_stats["f1"],
-            "boundary_precision": boundary_stats["boundary_precision"],
-            "boundary_recall": boundary_stats["boundary_recall"],
-            "boundary_f1": boundary_stats["boundary_f1"],
-            "sam2_score": float(np.mean(sam2_scores)) if sam2_scores else None,
-            "inference_sec": inference_sec,
+            "mAP@0.5": image_metrics["mAP@0.5"],
+            "mAP@0.5:0.95": image_metrics["mAP@0.5:0.95"],
+            "Latency (ms)": latency_ms,
         }
         rows.append(row)
+        predictions_by_image.append(prediction_instances)
+        targets_by_image.append(target_instances)
+        latency_ms_values.append(latency_ms)
 
-    summary = summarize_rows(rows)
+    summary = summarize_instance_results(predictions_by_image, targets_by_image, latency_ms_values)
     write_metrics_csv(output_dir / "metrics.csv", rows)
     (output_dir / "summary.json").write_text(
         json.dumps(
@@ -793,8 +693,6 @@ def main() -> int:
                 "prompt_mode": args.prompt_mode,
                 "max_prompts_per_image": args.max_prompts_per_image,
                 "positive_points_per_prompt": args.positive_points_per_prompt,
-                "negative_points_per_prompt": args.negative_points_per_prompt,
-                "negative_ring_radius": args.negative_ring_radius,
                 "head_model_size_mb": head_model_size,
                 "checkpoint_size_mb": checkpoint_size,
                 "summary": summary,

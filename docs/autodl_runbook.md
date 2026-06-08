@@ -104,7 +104,7 @@ python scripts/check_submodules.py
 python scripts/train_dinov3_boundary_head.py --config configs/train/dinov3_boundary_head_t1.yaml
 ```
 
-T1 使用原 V3 attention head 作为当前最新迭代：DINOv3 frozen features + attention boundary/foreground head + train-only augmentation + SAM2 box/positive/negative prompts。V1/V2 暂时搁置，只保留为历史配置。
+T1 使用原 V3 attention head 作为当前最新迭代：DINOv3 frozen features + attention boundary/foreground head + train-only augmentation + SAM2 box/positive-point prompts。V1/V2 暂时搁置，只保留为历史配置。
 
 当前配置只对 train 做在线增强，`augment_factor: 4` 会把 1161 张 train tile 扩展为每轮 4644 个训练样本。Val/Test 不增强。由于增强后的图像每次不同，train 特征缓存会自动关闭；Val 特征缓存仍可使用。
 
@@ -168,7 +168,9 @@ python scripts/infer_single_t1_image.py \
   --image data/images/test/your_tile.png
 ```
 
-如果有对应 GT mask，可以加 `--mask data/masks/test/your_tile.png` 输出 IoU、Dice 和 Boundary F1。
+如果有对应 GT mask，可以加 `--mask data/masks/test/your_tile.png` 输出 `mAP@0.5`、`mAP@0.5:0.95` 和 `Latency (ms)`。
+
+最终测试和参数搜索统一只使用这三项论文表格指标。SAM2 prompt 只使用 box 和正点，不再生成负点。
 
 ## 9. 每次实验前记录
 
