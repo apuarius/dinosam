@@ -16,8 +16,8 @@ output:
 
 train:
   epochs: 100
-  batch_size: 16
-  num_workers: 2
+  batch_size: 64
+  num_workers: 8
   lr: 0.001
   weight_decay: 0.0001
 
@@ -69,6 +69,10 @@ runtime:
   cache_features: true
   feature_cache_dir: null
   device: null
+  amp: true
+  amp_dtype: bfloat16
+  prefetch_factor: 4
+  persistent_workers: true
   resume: false
   resume_checkpoint: null
   visualize_every: 5

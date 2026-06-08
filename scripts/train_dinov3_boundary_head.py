@@ -53,8 +53,8 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "model_config": "configs/model/dinov3_sam2.yaml",
     "output_dir": "outputs/dinov3_boundary_head_t1",
     "epochs": 100,
-    "batch_size": 16,
-    "num_workers": 2,
+    "batch_size": 64,
+    "num_workers": 8,
     "lr": 1e-3,
     "weight_decay": 1e-4,
     "head_type": "t1",
@@ -72,6 +72,10 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "cache_features": True,
     "feature_cache_dir": None,
     "device": None,
+    "amp": True,
+    "amp_dtype": "bfloat16",
+    "prefetch_factor": 4,
+    "persistent_workers": True,
     "resume": False,
     "resume_checkpoint": None,
     "visualize_every": 25,
@@ -119,6 +123,10 @@ CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
         "cache_features",
         "feature_cache_dir",
         "device",
+        "amp",
+        "amp_dtype",
+        "prefetch_factor",
+        "persistent_workers",
         "resume",
         "resume_checkpoint",
         "visualize_every",
@@ -598,6 +606,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cache-features", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--feature-cache-dir", default=None)
     parser.add_argument("--device", default=None)
+    parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--amp-dtype", choices=("float16", "bfloat16"), default=None)
+    parser.add_argument("--prefetch-factor", type=int, default=None)
+    parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--visualize-every", type=int, default=None)
@@ -676,6 +688,26 @@ def seed_worker(worker_id: int) -> None:
     random.seed(seed)
 
 
+def resolve_amp_dtype(value: str) -> torch.dtype:
+    """解析 AMP dtype 配置。"""
+    text = str(value).strip().lower()
+    if text in {"float16", "fp16", "half"}:
+        return torch.float16
+    if text in {"bfloat16", "bf16"}:
+        return torch.bfloat16
+    raise ValueError(f"Unsupported amp_dtype: {value}")
+
+
+def make_grad_scaler(device: torch.device, amp_enabled: bool, amp_dtype: torch.dtype) -> Any | None:
+    """仅在 CUDA fp16 AMP 下创建 GradScaler；bf16 不需要缩放。"""
+    if not amp_enabled or device.type != "cuda" or amp_dtype != torch.float16:
+        return None
+    try:
+        return torch.amp.GradScaler("cuda", enabled=True)
+    except TypeError:
+        return torch.cuda.amp.GradScaler(enabled=True)
+
+
 def make_loader(
     dataset_root: str,
     limit: int | None,
@@ -683,10 +715,16 @@ def make_loader(
     num_workers: int,
     shuffle: bool,
     augment_config: TrainAugmentConfig | None = None,
+    prefetch_factor: int | None = None,
+    persistent_workers: bool = False,
 ) -> DataLoader:
     """根据数据集根目录构建 PyTorch DataLoader。"""
     pairs = limit_pairs(list_instance_tile_pairs(dataset_root), limit)
     dataset = InstanceTileDataset(pairs, augment_config=augment_config)
+    loader_kwargs: dict[str, Any] = {}
+    if num_workers > 0:
+        loader_kwargs["prefetch_factor"] = max(1, int(prefetch_factor or 2))
+        loader_kwargs["persistent_workers"] = bool(persistent_workers)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -695,6 +733,7 @@ def make_loader(
         collate_fn=collate_tiles,
         pin_memory=torch.cuda.is_available(),
         worker_init_fn=seed_worker if num_workers > 0 else None,
+        **loader_kwargs,
     )
 
 
@@ -802,6 +841,8 @@ def load_or_extract_features(
     cache_dir: Path,
     cache_features: bool,
     device: torch.device,
+    amp_enabled: bool = False,
+    amp_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
     """优先读取 DINOv3 特征缓存，不存在时运行冻结编码器并写入缓存。"""
     paths = feature_cache_paths(cache_dir, split, names)
@@ -812,7 +853,12 @@ def load_or_extract_features(
     if dinov3.processor is None:
         raise RuntimeError("Boundary head training currently expects a Hugging Face DINOv3 model.")
 
-    with torch.no_grad():
+    autocast_dtype = amp_dtype or torch.bfloat16
+    with torch.no_grad(), torch.amp.autocast(
+        device_type=device.type,
+        dtype=autocast_dtype,
+        enabled=bool(amp_enabled and device.type == "cuda"),
+    ):
         inputs = dinov3.prepare_inputs(images)
         raw_features = dinov3(inputs).raw
         features = extract_patch_feature_tensor(raw_features).to(device)
@@ -933,6 +979,8 @@ def save_validation_visualizations(
                 cache_dir=cache_dir,
                 cache_features=args.cache_features,
                 device=device,
+                amp_enabled=args.amp,
+                amp_dtype=resolve_amp_dtype(args.amp_dtype),
             )
             probabilities = torch.sigmoid(head(features)).detach().float().cpu().numpy()
             for index, name in enumerate(names):
@@ -962,6 +1010,7 @@ def run_epoch(
     cache_dir: Path,
     args: argparse.Namespace,
     device: torch.device,
+    scaler: torch.amp.GradScaler | None,
 ) -> dict[str, float | int | None]:
     """运行一个训练或验证 epoch，并返回 YOLO 风格的聚合指标。"""
     training = optimizer is not None
@@ -1001,6 +1050,8 @@ def run_epoch(
             cache_dir=cache_dir,
             cache_features=batch_cache_features,
             device=device,
+            amp_enabled=args.amp,
+            amp_dtype=resolve_amp_dtype(args.amp_dtype),
         )
         targets = build_patch_targets(
             instance_masks,
@@ -1009,25 +1060,37 @@ def run_epoch(
             boundary_dilation=args.gt_boundary_dilation,
         )
 
-        logits = head(features)
-        boundary_loss = balanced_bce_with_logits(
-            logits[:, 0],
-            targets[:, 0],
-            target_threshold=args.target_threshold,
-            max_pos_weight=args.max_pos_weight,
-        )
-        foreground_loss = balanced_bce_with_logits(
-            logits[:, 1],
-            targets[:, 1],
-            target_threshold=args.target_threshold,
-            max_pos_weight=args.max_pos_weight,
-        )
-        loss = args.boundary_loss_weight * boundary_loss + args.foreground_loss_weight * foreground_loss
+        amp_dtype = resolve_amp_dtype(args.amp_dtype)
+        amp_enabled = bool(args.amp and device.type == "cuda")
+        with torch.amp.autocast(
+            device_type=device.type,
+            dtype=amp_dtype,
+            enabled=amp_enabled,
+        ):
+            logits = head(features)
+            boundary_loss = balanced_bce_with_logits(
+                logits[:, 0],
+                targets[:, 0],
+                target_threshold=args.target_threshold,
+                max_pos_weight=args.max_pos_weight,
+            )
+            foreground_loss = balanced_bce_with_logits(
+                logits[:, 1],
+                targets[:, 1],
+                target_threshold=args.target_threshold,
+                max_pos_weight=args.max_pos_weight,
+            )
+            loss = args.boundary_loss_weight * boundary_loss + args.foreground_loss_weight * foreground_loss
 
         if training:
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            optimizer.step()
+            if scaler is not None and scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
         batch_size = len(images)
         total_images += batch_size
@@ -1204,7 +1267,9 @@ def main() -> int:
     args = parse_training_args()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
+    torch.set_float32_matmul_precision("high")
     torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.benchmark = True
 
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     output_dir = resolve_project_path(args.output_dir)
@@ -1226,6 +1291,9 @@ def main() -> int:
         )
     ).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    amp_dtype = resolve_amp_dtype(args.amp_dtype)
+    amp_enabled = bool(args.amp and device.type == "cuda")
+    scaler = make_grad_scaler(device, amp_enabled=amp_enabled, amp_dtype=amp_dtype)
     train_augment_config = build_train_augment_config(args)
 
     train_loader = make_loader(
@@ -1235,6 +1303,8 @@ def main() -> int:
         num_workers=args.num_workers,
         shuffle=True,
         augment_config=train_augment_config,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=args.persistent_workers,
     )
     val_loader = make_loader(
         args.val_root,
@@ -1243,6 +1313,8 @@ def main() -> int:
         num_workers=args.num_workers,
         shuffle=False,
         augment_config=None,
+        prefetch_factor=args.prefetch_factor,
+        persistent_workers=args.persistent_workers,
     )
 
     print(f"Config: {args.config}")
@@ -1256,6 +1328,12 @@ def main() -> int:
         print("Train augmentation: off")
     print(f"Head type: {args.head_type}")
     print(f"Metric threshold: {args.metric_threshold}")
+    print(f"AMP: {'on' if amp_enabled else 'off'} ({args.amp_dtype})")
+    print(
+        "DataLoader: "
+        f"batch={args.batch_size}, workers={args.num_workers}, "
+        f"prefetch_factor={args.prefetch_factor}, persistent_workers={args.persistent_workers}"
+    )
     print(f"Feature cache: {'on' if args.cache_features else 'off'} -> {cache_dir}")
     print(f"Output dir: {output_dir}")
 
@@ -1290,6 +1368,7 @@ def main() -> int:
                 cache_dir=cache_dir,
                 args=args,
                 device=device,
+                scaler=scaler,
             )
             val_metrics = run_epoch(
                 epoch=epoch,
@@ -1302,6 +1381,7 @@ def main() -> int:
                 cache_dir=cache_dir,
                 args=args,
                 device=device,
+                scaler=None,
             )
             save_validation_visualizations(
                 epoch=epoch,

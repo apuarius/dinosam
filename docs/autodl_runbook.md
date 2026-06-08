@@ -108,6 +108,26 @@ T1 使用原 V3 attention head 作为当前最新迭代：DINOv3 frozen features
 
 当前配置只对 train 做在线增强，`augment_factor: 4` 会把 1161 张 train tile 扩展为每轮 4644 个训练样本。Val/Test 不增强。由于增强后的图像每次不同，train 特征缓存会自动关闭；Val 特征缓存仍可使用。
 
+T1 默认使用较高吞吐配置：
+
+```text
+batch_size: 64
+num_workers: 8
+amp: true
+amp_dtype: bfloat16
+prefetch_factor: 4
+```
+
+如果 `nvidia-smi` 里显存仍明显偏低，可以继续试：
+
+```bash
+python scripts/train_dinov3_boundary_head.py \
+  --config configs/train/dinov3_boundary_head_t1.yaml \
+  --batch-size 96
+```
+
+如果仍稳定且显存充足，再试 `--batch-size 128`。如果 OOM，就退回 `--batch-size 32` 或 `64`。
+
 ## 8. 每次实验前记录
 
 ```bash
