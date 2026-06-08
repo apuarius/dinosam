@@ -71,18 +71,21 @@ Training uses online augmentation only for `train`. With the default `augment_fa
 1161 train tiles become 4644 train samples per epoch. Validation and test images are
 not augmented. Train feature caching is disabled while online augmentation is enabled.
 
-T1 defaults target higher GPU utilization on large GPUs:
+T1 defaults balance GPU utilization with stable DataLoader startup:
 
 ```text
 batch_size: 256
-num_workers: 16
+num_workers: 8
 amp_dtype: bfloat16
 preprocess_in_workers: true
-prefetch_factor: 6
+prefetch_factor: 2
 ```
 
-If the process runs out of memory, reduce to `--batch-size 128` or `64`. If
-DataLoader workers are unstable on the server, reduce to `--num-workers 8`.
+Train workers return the prepared DINOv3 tensor and mask without transferring the
+original PIL image to the main process. If startup is still unstable, use
+`--batch-size 128 --num-workers 4 --prefetch-factor 2`. After confirming stable
+loading, try `--batch-size 384` or `512` if wall-clock speed matters more than
+per-epoch update count.
 
 ## Current External Versions
 

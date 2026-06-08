@@ -54,7 +54,7 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "output_dir": "outputs/dinov3_boundary_head_t1",
     "epochs": 100,
     "batch_size": 256,
-    "num_workers": 16,
+    "num_workers": 8,
     "lr": 1e-3,
     "weight_decay": 1e-4,
     "head_type": "t1",
@@ -76,7 +76,7 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "amp_dtype": "bfloat16",
     "preprocess_in_workers": True,
     "dinov3_input_size": 224,
-    "prefetch_factor": 6,
+    "prefetch_factor": 2,
     "persistent_workers": True,
     "resume": False,
     "resume_checkpoint": None,
@@ -407,11 +407,13 @@ class InstanceTileDataset(Dataset):
         pairs: list[InstanceTilePair],
         augment_config: TrainAugmentConfig | None = None,
         preprocess_config: DINOv3PreprocessConfig | None = None,
+        keep_image: bool = True,
     ) -> None:
         """保存已经配对好的 Image/Instance 文件路径列表。"""
         self.pairs = pairs
         self.augment_config = augment_config
         self.preprocess_config = preprocess_config
+        self.keep_image = keep_image
 
     def __len__(self) -> int:
         """返回数据集中的切片数量。"""
@@ -430,7 +432,6 @@ class InstanceTileDataset(Dataset):
         if self.augment_config is not None:
             image, instance_mask = apply_train_augmentation(image, instance_mask, self.augment_config)
         item = {
-            "image": image,
             "instance_mask": instance_mask,
             "name": pair.name,
         }
@@ -439,6 +440,8 @@ class InstanceTileDataset(Dataset):
                 image,
                 image_size=self.preprocess_config.image_size,
             )
+        if self.keep_image:
+            item["image"] = image
         return item
 
 
@@ -703,10 +706,11 @@ def parse_training_args() -> argparse.Namespace:
 def collate_tiles(items: list[dict[str, Any]]) -> dict[str, Any]:
     """把 DataLoader 读出的样本整理成图片列表、mask 列表和文件名列表。"""
     batch = {
-        "images": [item["image"] for item in items],
         "instance_masks": [item["instance_mask"] for item in items],
         "names": [item["name"] for item in items],
     }
+    if items and "image" in items[0]:
+        batch["images"] = [item["image"] for item in items]
     if items and "dinov3_input" in items[0]:
         batch["dinov3_inputs"] = torch.stack([item["dinov3_input"] for item in items], dim=0)
     return batch
@@ -757,6 +761,7 @@ def make_loader(
     preprocess_config: DINOv3PreprocessConfig | None = None,
     prefetch_factor: int | None = None,
     persistent_workers: bool = False,
+    keep_image: bool = True,
 ) -> DataLoader:
     """根据数据集根目录构建 PyTorch DataLoader。"""
     pairs = limit_pairs(list_instance_tile_pairs(dataset_root), limit)
@@ -764,6 +769,7 @@ def make_loader(
         pairs,
         augment_config=augment_config,
         preprocess_config=preprocess_config,
+        keep_image=keep_image,
     )
     loader_kwargs: dict[str, Any] = {}
     if num_workers > 0:
@@ -879,7 +885,7 @@ def feature_cache_paths(cache_dir: Path, split: str, names: list[str]) -> list[P
 
 def load_or_extract_features(
     dinov3: DINOv3Wrapper,
-    images: list[Image.Image],
+    images: list[Image.Image] | None,
     names: list[str],
     split: str,
     cache_dir: Path,
@@ -895,9 +901,6 @@ def load_or_extract_features(
         features = [torch.load(path, map_location=device).float() for path in paths]
         return torch.stack(features, dim=0)
 
-    if dinov3.processor is None:
-        raise RuntimeError("Boundary head training currently expects a Hugging Face DINOv3 model.")
-
     autocast_dtype = amp_dtype or torch.bfloat16
     with torch.no_grad(), torch.amp.autocast(
         device_type=device.type,
@@ -905,6 +908,10 @@ def load_or_extract_features(
         enabled=bool(amp_enabled and device.type == "cuda"),
     ):
         if dinov3_inputs is None:
+            if images is None:
+                raise ValueError("images must be provided when dinov3_inputs is not available.")
+            if dinov3.processor is None:
+                raise RuntimeError("Boundary head training currently expects a Hugging Face DINOv3 model.")
             inputs = dinov3.prepare_inputs(images)
         else:
             inputs = {"pixel_values": dinov3_inputs.to(device, non_blocking=True)}
@@ -1089,7 +1096,7 @@ def run_epoch(
     )
     batch_cache_features = args.cache_features and not (training and args.augment_train and args.augment_factor > 1)
     for batch in bar:
-        images = batch["images"]
+        images = batch.get("images")
         names = batch["names"]
         instance_masks = batch["instance_masks"]
         dinov3_inputs = batch.get("dinov3_inputs")
@@ -1144,7 +1151,7 @@ def run_epoch(
                 loss.backward()
                 optimizer.step()
 
-        batch_size = len(images)
+        batch_size = len(names)
         total_images += batch_size
         total_loss += float(loss.detach()) * batch_size
         total_boundary_loss += float(boundary_loss.detach()) * batch_size
@@ -1354,6 +1361,7 @@ def main() -> int:
         if bool(args.preprocess_in_workers)
         else None
     )
+    keep_train_images = preprocess_config is None
 
     train_loader = make_loader(
         args.train_root,
@@ -1365,6 +1373,7 @@ def main() -> int:
         preprocess_config=preprocess_config,
         prefetch_factor=args.prefetch_factor,
         persistent_workers=args.persistent_workers,
+        keep_image=keep_train_images,
     )
     val_loader = make_loader(
         args.val_root,
@@ -1376,6 +1385,7 @@ def main() -> int:
         preprocess_config=preprocess_config,
         prefetch_factor=args.prefetch_factor,
         persistent_workers=args.persistent_workers,
+        keep_image=True,
     )
 
     print(f"Config: {args.config}")
@@ -1400,6 +1410,7 @@ def main() -> int:
         f"{'workers' if preprocess_config is not None else 'main process/HF processor'}, "
         f"input_size={dinov3_input_size}"
     )
+    print(f"Train image transfer: {'on' if keep_train_images else 'off'}")
     print(f"Feature cache: {'on' if args.cache_features else 'off'} -> {cache_dir}")
     print(f"Output dir: {output_dir}")
 

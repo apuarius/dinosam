@@ -11,8 +11,8 @@ output:  # 训练输出目录设置。
   output_dir: outputs/dinov3_boundary_head_t1  # T1 checkpoint、指标、可视化和特征缓存输出目录。
 train:  # 优化器和训练轮数设置。
   epochs: 200  # 总训练轮数；resume=true 时会从 last.pt 继续到该轮数。
-  batch_size: 256  # 每个 batch 的图像数量；如 OOM 可用命令行降到 128/64。
-  num_workers: 16  # DataLoader 后台读取进程数量，用于并行在线增强、读图和 DINOv3 输入预处理。
+  batch_size: 256  # 每个 batch 的图像数量；如首批启动慢可用命令行降到 128。
+  num_workers: 8  # DataLoader 后台读取进程数量，用于并行在线增强、读图和 DINOv3 输入预处理。
   lr: 0.001  # AdamW 初始学习率。
   weight_decay: 0.0001  # AdamW 权重衰减，降低过拟合。
 head:  # 边界检测头结构设置。
@@ -63,7 +63,7 @@ runtime:  # 运行时、缓存和续训设置。
   amp_dtype: bfloat16  # RTX 50 系列优先使用 bf16；如需 fp16 可命令行覆盖。
   preprocess_in_workers: true  # 在 worker 内完成 resize/normalize，避免主进程 HF processor 卡住 GPU。
   dinov3_input_size: 224  # 与 DINOv3 SAT-493M 默认输入尺寸保持一致。
-  prefetch_factor: 6  # 每个 DataLoader worker 预取 batch 数，降低 GPU 等数据的时间。
+  prefetch_factor: 2  # 每个 DataLoader worker 预取 batch 数；过高会增加首批 worker/IPC 压力。
   persistent_workers: true  # epoch 间复用 worker，减少反复启动开销。
   resume: false  # 新区域数据集从头训练，避免误用旧 checkpoint。
   resume_checkpoint: null  # 指定续训 checkpoint；null 时默认使用 output_dir/checkpoints/last.pt。

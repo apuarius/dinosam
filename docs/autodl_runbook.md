@@ -112,11 +112,11 @@ T1 默认使用较高吞吐配置：
 
 ```text
 batch_size: 256
-num_workers: 16
+num_workers: 8
 amp: true
 amp_dtype: bfloat16
 preprocess_in_workers: true
-prefetch_factor: 6
+prefetch_factor: 2
 ```
 
 这版会在 DataLoader worker 内完成 DINOv3 的 224 resize 和 SAT-493M normalize，避免主进程 Hugging Face processor 卡住 GPU。
@@ -126,16 +126,19 @@ prefetch_factor: 6
 ```bash
 python scripts/train_dinov3_boundary_head.py \
   --config configs/train/dinov3_boundary_head_t1.yaml \
-  --batch-size 128
+  --batch-size 128 \
+  --num-workers 4 \
+  --prefetch-factor 2
 ```
 
-如果 DataLoader worker 不稳定或 CPU 压力太大，降 worker：
+如果启动稳定，想进一步压缩每轮训练时间，优先只提高 batch，不再提高 prefetch：
 
 ```bash
 python scripts/train_dinov3_boundary_head.py \
   --config configs/train/dinov3_boundary_head_t1.yaml \
-  --batch-size 128 \
-  --num-workers 8
+  --batch-size 384 \
+  --num-workers 8 \
+  --prefetch-factor 2
 ```
 
 如果需要回退到 Hugging Face processor 主进程预处理：
