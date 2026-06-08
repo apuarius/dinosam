@@ -93,13 +93,12 @@ Run one random paired image from the test split and save the predicted mask,
 prompt visualization, overlay, probability maps, and summary:
 
 ```bash
-python scripts/infer_single_t1_image.py \
-  --config configs/train/dinov3_boundary_head_t1.yaml \
-  --checkpoint outputs/dinov3_boundary_head_t1/checkpoints/best.pt
+python scripts/infer_single_t1_image.py
 ```
 
-Use `--image path/to/image.png` for a specific image. Add `--mask path/to/mask.png`
-when ground truth is available. Final evaluation reports only:
+Edit the `USER SETTINGS` block at the top of `scripts/infer_single_t1_image.py`
+to change `IMAGE_PATH`, `MASK_PATH`, or `CHECKPOINT_PATH`. Keep `IMAGE_PATH = None`
+to randomly choose one paired test image. Final evaluation reports only:
 
 ```text
 mAP@0.5

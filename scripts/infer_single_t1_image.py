@@ -1,10 +1,10 @@
-import argparse
 import json
 import random
 import sys
 import time
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -43,34 +43,66 @@ from run_boundary_head_sam2_prompts import (  # noqa: E402
     prompt_point_counts,
     run_sam2_prompts,
 )
-from train_dinov3_boundary_head import DEFAULT_CONFIG_PATH, load_training_values, resize_probability_map  # noqa: E402
+from train_dinov3_boundary_head import load_training_values, resize_probability_map  # noqa: E402
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Run T1 DINOv3 boundary head + SAM2 on one image.")
-    parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
-    parser.add_argument("--checkpoint", default=None)
-    parser.add_argument("--image", default=None, help="Input image. If omitted, one paired test image is selected.")
-    parser.add_argument("--mask", default=None, help="Optional ground-truth instance mask for metrics/visualization.")
-    parser.add_argument("--test-root", default=None, help="Test image root used when --image is omitted.")
-    parser.add_argument("--split-name", default="test", help="Feature-cache split name.")
-    parser.add_argument("--output-dir", default="outputs/t1_single_image_inference")
-    parser.add_argument("--seed", type=int, default=None, help="Random seed for selecting a test image.")
-    parser.add_argument("--max-prompts-per-image", type=int, default=24)
-    parser.add_argument("--min-proposal-area", type=int, default=512)
-    parser.add_argument("--box-margin", type=int, default=4)
-    parser.add_argument("--positive-points-per-prompt", type=int, default=1)
-    parser.add_argument("--prompt-mode", choices=("box", "point", "box_point"), default="box_point")
-    parser.add_argument("--boundary-threshold", type=float, default=None)
-    parser.add_argument("--foreground-threshold", type=float, default=None)
-    parser.add_argument("--device", default=None)
-    parser.add_argument("--cache-features", action=argparse.BooleanOptionalAction, default=None)
-    parser.add_argument("--feature-cache-dir", default=None)
-    parser.add_argument("--multimask-output", action=argparse.BooleanOptionalAction, default=False)
-    return parser
+# =========================
+# USER SETTINGS
+# =========================
+# Edit these paths on the server, then run:
+#   python scripts/infer_single_t1_image.py
+CONFIG_PATH = "configs/train/dinov3_boundary_head_t1.yaml"
+CHECKPOINT_PATH = "outputs/dinov3_boundary_head_t1/checkpoints/best.pt"
+
+# Set IMAGE_PATH to a specific test image path. Keep None to randomly select one
+# paired image from TEST_ROOT.
+IMAGE_PATH = None
+MASK_PATH = None
+TEST_ROOT = "data/images/test"
+
+OUTPUT_DIR = "outputs/t1_single_image_inference"
+SPLIT_NAME = "test"
+SEED = None
+
+# Prompt and runtime settings. Usually keep these unchanged for T1.
+MAX_PROMPTS_PER_IMAGE = 24
+MIN_PROPOSAL_AREA = 512
+BOX_MARGIN = 4
+POSITIVE_POINTS_PER_PROMPT = 1
+PROMPT_MODE = "box_point"
+BOUNDARY_THRESHOLD = None
+FOREGROUND_THRESHOLD = None
+DEVICE = None
+CACHE_FEATURES = None
+FEATURE_CACHE_DIR = None
+MULTIMASK_OUTPUT = False
 
 
-def choose_input_pair(args: argparse.Namespace, training_values: dict[str, Any]) -> tuple[InstanceTilePair, bool]:
+def build_settings() -> SimpleNamespace:
+    return SimpleNamespace(
+        config=CONFIG_PATH,
+        checkpoint=CHECKPOINT_PATH,
+        image=IMAGE_PATH,
+        mask=MASK_PATH,
+        test_root=TEST_ROOT,
+        split_name=SPLIT_NAME,
+        output_dir=OUTPUT_DIR,
+        seed=SEED,
+        max_prompts_per_image=MAX_PROMPTS_PER_IMAGE,
+        min_proposal_area=MIN_PROPOSAL_AREA,
+        box_margin=BOX_MARGIN,
+        positive_points_per_prompt=POSITIVE_POINTS_PER_PROMPT,
+        prompt_mode=PROMPT_MODE,
+        boundary_threshold=BOUNDARY_THRESHOLD,
+        foreground_threshold=FOREGROUND_THRESHOLD,
+        device=DEVICE,
+        cache_features=CACHE_FEATURES,
+        feature_cache_dir=FEATURE_CACHE_DIR,
+        multimask_output=MULTIMASK_OUTPUT,
+    )
+
+
+def choose_input_pair(args: SimpleNamespace, training_values: dict[str, Any]) -> tuple[InstanceTilePair, bool]:
     if args.image:
         image_path = resolve_project_path(args.image)
         if not image_path.exists():
@@ -133,7 +165,12 @@ def build_metrics(
 
 
 def main() -> int:
-    args = build_parser().parse_args()
+    if len(sys.argv) > 1:
+        raise SystemExit(
+            "This script is configured in code. Edit USER SETTINGS at the top of "
+            "scripts/infer_single_t1_image.py, then run: python scripts/infer_single_t1_image.py"
+        )
+    args = build_settings()
     training_values = load_training_values(resolve_project_path(args.config))
     train_output_dir = resolve_project_path(training_values["output_dir"])
     checkpoint_path = (
@@ -172,11 +209,6 @@ def main() -> int:
 
     print(f"Image: {pair.image_path}")
     print(f"Checkpoint: {checkpoint_path}")
-    print(f"Split name: {split_name}")
-    print(f"Device: {device}")
-    print(f"Feature cache: {'on' if cache_features else 'off'} -> {cache_dir}")
-    print(f"Boundary threshold: {boundary_threshold:.4f}")
-    print(f"Foreground threshold: {foreground_threshold:.4f}")
     print(f"Output dir: {output_dir}")
 
     dinov3 = ensure_feature_source(

@@ -154,21 +154,18 @@ python scripts/train_dinov3_boundary_head.py \
 默认从 test 集随机选择一张已配对图像，调用 `best.pt` 输出二值掩膜、prompt 图、叠加图、boundary/foreground 概率图和 summary：
 
 ```bash
-python scripts/infer_single_t1_image.py \
-  --config configs/train/dinov3_boundary_head_t1.yaml \
-  --checkpoint outputs/dinov3_boundary_head_t1/checkpoints/best.pt
+python scripts/infer_single_t1_image.py
 ```
 
-指定某一张图像时使用：
+指定某一张图像或切换模型时，直接修改 `scripts/infer_single_t1_image.py` 顶部的 `USER SETTINGS`：
 
-```bash
-python scripts/infer_single_t1_image.py \
-  --config configs/train/dinov3_boundary_head_t1.yaml \
-  --checkpoint outputs/dinov3_boundary_head_t1/checkpoints/best.pt \
-  --image data/images/test/your_tile.png
+```python
+CHECKPOINT_PATH = "outputs/dinov3_boundary_head_t1/checkpoints/best.pt"
+IMAGE_PATH = "data/images/test/your_tile.png"
+MASK_PATH = "data/masks/test/your_tile.png"
 ```
 
-如果有对应 GT mask，可以加 `--mask data/masks/test/your_tile.png` 输出 `mAP@0.5`、`mAP@0.5:0.95` 和 `Latency (ms)`。
+如果 `IMAGE_PATH = None`，脚本会从 `TEST_ROOT = "data/images/test"` 中随机选择一张已配对图像。设置 `MASK_PATH` 后会输出 `mAP@0.5`、`mAP@0.5:0.95` 和 `Latency (ms)`。
 
 最终测试和参数搜索统一只使用这三项论文表格指标。SAM2 prompt 只使用 box 和正点，不再生成负点。
 
