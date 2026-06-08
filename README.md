@@ -74,14 +74,15 @@ not augmented. Train feature caching is disabled while online augmentation is en
 T1 defaults target higher GPU utilization on large GPUs:
 
 ```text
-batch_size: 64
-num_workers: 8
+batch_size: 256
+num_workers: 16
 amp_dtype: bfloat16
-prefetch_factor: 4
+preprocess_in_workers: true
+prefetch_factor: 6
 ```
 
-If GPU memory remains low, try `--batch-size 96` or `--batch-size 128`. If the
-process runs out of memory, reduce back to `--batch-size 32`.
+If the process runs out of memory, reduce to `--batch-size 128` or `64`. If
+DataLoader workers are unstable on the server, reduce to `--num-workers 8`.
 
 ## Current External Versions
 

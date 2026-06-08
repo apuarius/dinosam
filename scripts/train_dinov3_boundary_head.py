@@ -53,8 +53,8 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "model_config": "configs/model/dinov3_sam2.yaml",
     "output_dir": "outputs/dinov3_boundary_head_t1",
     "epochs": 100,
-    "batch_size": 64,
-    "num_workers": 8,
+    "batch_size": 256,
+    "num_workers": 16,
     "lr": 1e-3,
     "weight_decay": 1e-4,
     "head_type": "t1",
@@ -74,7 +74,9 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "device": None,
     "amp": True,
     "amp_dtype": "bfloat16",
-    "prefetch_factor": 4,
+    "preprocess_in_workers": True,
+    "dinov3_input_size": 224,
+    "prefetch_factor": 6,
     "persistent_workers": True,
     "resume": False,
     "resume_checkpoint": None,
@@ -125,6 +127,8 @@ CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
         "device",
         "amp",
         "amp_dtype",
+        "preprocess_in_workers",
+        "dinov3_input_size",
         "prefetch_factor",
         "persistent_workers",
         "resume",
@@ -195,6 +199,14 @@ class TrainAugmentConfig:
     gamma_prob: float = 0.5
     gamma_min: float = 0.8
     gamma_max: float = 1.2
+
+
+@dataclass(frozen=True)
+class DINOv3PreprocessConfig:
+    """DataLoader worker 内 DINOv3 输入预处理配置。"""
+
+    enabled: bool = True
+    image_size: int = 224
 
 
 def probability(value: Any) -> float:
@@ -322,6 +334,16 @@ def _apply_gamma(image: Image.Image, config: TrainAugmentConfig) -> Image.Image:
     return Image.fromarray(np.clip(adjusted * 255.0, 0, 255).astype(np.uint8), mode="RGB")
 
 
+def image_to_dinov3_input_tensor(image: Image.Image, image_size: int) -> torch.Tensor:
+    """在 worker 内完成 DINOv3 SAT-493M resize、rescale 和 normalize。"""
+    resized = image.convert("RGB").resize((image_size, image_size), Image.Resampling.BILINEAR)
+    array = np.asarray(resized, dtype=np.float32) / 255.0
+    tensor = torch.from_numpy(array).permute(2, 0, 1).contiguous()
+    mean = torch.tensor([0.430, 0.411, 0.296], dtype=torch.float32).view(3, 1, 1)
+    std = torch.tensor([0.213, 0.156, 0.143], dtype=torch.float32).view(3, 1, 1)
+    return (tensor - mean) / std
+
+
 def apply_train_augmentation(
     image: Image.Image,
     instance_mask: np.ndarray,
@@ -380,10 +402,16 @@ def apply_train_augmentation(
 class InstanceTileDataset(Dataset):
     """读取遥感切片和同名实例 mask，供检测头训练使用。"""
 
-    def __init__(self, pairs: list[InstanceTilePair], augment_config: TrainAugmentConfig | None = None) -> None:
+    def __init__(
+        self,
+        pairs: list[InstanceTilePair],
+        augment_config: TrainAugmentConfig | None = None,
+        preprocess_config: DINOv3PreprocessConfig | None = None,
+    ) -> None:
         """保存已经配对好的 Image/Instance 文件路径列表。"""
         self.pairs = pairs
         self.augment_config = augment_config
+        self.preprocess_config = preprocess_config
 
     def __len__(self) -> int:
         """返回数据集中的切片数量。"""
@@ -401,11 +429,17 @@ class InstanceTileDataset(Dataset):
         instance_mask = load_instance_mask(pair.instance_path).copy()
         if self.augment_config is not None:
             image, instance_mask = apply_train_augmentation(image, instance_mask, self.augment_config)
-        return {
+        item = {
             "image": image,
             "instance_mask": instance_mask,
             "name": pair.name,
         }
+        if self.preprocess_config is not None and self.preprocess_config.enabled:
+            item["dinov3_input"] = image_to_dinov3_input_tensor(
+                image,
+                image_size=self.preprocess_config.image_size,
+            )
+        return item
 
 
 class BinaryMetricAccumulator:
@@ -608,6 +642,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default=None)
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--amp-dtype", choices=("float16", "bfloat16"), default=None)
+    parser.add_argument("--preprocess-in-workers", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--dinov3-input-size", type=int, default=None)
     parser.add_argument("--prefetch-factor", type=int, default=None)
     parser.add_argument("--persistent-workers", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--resume", action=argparse.BooleanOptionalAction, default=None)
@@ -666,11 +702,14 @@ def parse_training_args() -> argparse.Namespace:
 
 def collate_tiles(items: list[dict[str, Any]]) -> dict[str, Any]:
     """把 DataLoader 读出的样本整理成图片列表、mask 列表和文件名列表。"""
-    return {
+    batch = {
         "images": [item["image"] for item in items],
         "instance_masks": [item["instance_mask"] for item in items],
         "names": [item["name"] for item in items],
     }
+    if items and "dinov3_input" in items[0]:
+        batch["dinov3_inputs"] = torch.stack([item["dinov3_input"] for item in items], dim=0)
+    return batch
 
 
 def limit_pairs(pairs: list[InstanceTilePair], limit: int | None) -> list[InstanceTilePair]:
@@ -715,12 +754,17 @@ def make_loader(
     num_workers: int,
     shuffle: bool,
     augment_config: TrainAugmentConfig | None = None,
+    preprocess_config: DINOv3PreprocessConfig | None = None,
     prefetch_factor: int | None = None,
     persistent_workers: bool = False,
 ) -> DataLoader:
     """根据数据集根目录构建 PyTorch DataLoader。"""
     pairs = limit_pairs(list_instance_tile_pairs(dataset_root), limit)
-    dataset = InstanceTileDataset(pairs, augment_config=augment_config)
+    dataset = InstanceTileDataset(
+        pairs,
+        augment_config=augment_config,
+        preprocess_config=preprocess_config,
+    )
     loader_kwargs: dict[str, Any] = {}
     if num_workers > 0:
         loader_kwargs["prefetch_factor"] = max(1, int(prefetch_factor or 2))
@@ -843,6 +887,7 @@ def load_or_extract_features(
     device: torch.device,
     amp_enabled: bool = False,
     amp_dtype: torch.dtype | None = None,
+    dinov3_inputs: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """优先读取 DINOv3 特征缓存，不存在时运行冻结编码器并写入缓存。"""
     paths = feature_cache_paths(cache_dir, split, names)
@@ -859,7 +904,10 @@ def load_or_extract_features(
         dtype=autocast_dtype,
         enabled=bool(amp_enabled and device.type == "cuda"),
     ):
-        inputs = dinov3.prepare_inputs(images)
+        if dinov3_inputs is None:
+            inputs = dinov3.prepare_inputs(images)
+        else:
+            inputs = {"pixel_values": dinov3_inputs.to(device, non_blocking=True)}
         raw_features = dinov3(inputs).raw
         features = extract_patch_feature_tensor(raw_features).to(device)
 
@@ -971,6 +1019,7 @@ def save_validation_visualizations(
             images = batch["images"]
             names = batch["names"]
             instance_masks = batch["instance_masks"]
+            dinov3_inputs = batch.get("dinov3_inputs")
             features = load_or_extract_features(
                 dinov3=dinov3,
                 images=images,
@@ -981,6 +1030,7 @@ def save_validation_visualizations(
                 device=device,
                 amp_enabled=args.amp,
                 amp_dtype=resolve_amp_dtype(args.amp_dtype),
+                dinov3_inputs=dinov3_inputs,
             )
             probabilities = torch.sigmoid(head(features)).detach().float().cpu().numpy()
             for index, name in enumerate(names):
@@ -1042,6 +1092,7 @@ def run_epoch(
         images = batch["images"]
         names = batch["names"]
         instance_masks = batch["instance_masks"]
+        dinov3_inputs = batch.get("dinov3_inputs")
         features = load_or_extract_features(
             dinov3=dinov3,
             images=images,
@@ -1052,6 +1103,7 @@ def run_epoch(
             device=device,
             amp_enabled=args.amp,
             amp_dtype=resolve_amp_dtype(args.amp_dtype),
+            dinov3_inputs=dinov3_inputs,
         )
         targets = build_patch_targets(
             instance_masks,
@@ -1295,6 +1347,13 @@ def main() -> int:
     amp_enabled = bool(args.amp and device.type == "cuda")
     scaler = make_grad_scaler(device, amp_enabled=amp_enabled, amp_dtype=amp_dtype)
     train_augment_config = build_train_augment_config(args)
+    model_image_size = int(getattr(getattr(dinov3.model, "config", None), "image_size", 224))
+    dinov3_input_size = int(args.dinov3_input_size or model_image_size)
+    preprocess_config = (
+        DINOv3PreprocessConfig(enabled=True, image_size=dinov3_input_size)
+        if bool(args.preprocess_in_workers)
+        else None
+    )
 
     train_loader = make_loader(
         args.train_root,
@@ -1303,6 +1362,7 @@ def main() -> int:
         num_workers=args.num_workers,
         shuffle=True,
         augment_config=train_augment_config,
+        preprocess_config=preprocess_config,
         prefetch_factor=args.prefetch_factor,
         persistent_workers=args.persistent_workers,
     )
@@ -1313,6 +1373,7 @@ def main() -> int:
         num_workers=args.num_workers,
         shuffle=False,
         augment_config=None,
+        preprocess_config=preprocess_config,
         prefetch_factor=args.prefetch_factor,
         persistent_workers=args.persistent_workers,
     )
@@ -1333,6 +1394,11 @@ def main() -> int:
         "DataLoader: "
         f"batch={args.batch_size}, workers={args.num_workers}, "
         f"prefetch_factor={args.prefetch_factor}, persistent_workers={args.persistent_workers}"
+    )
+    print(
+        "DINOv3 preprocessing: "
+        f"{'workers' if preprocess_config is not None else 'main process/HF processor'}, "
+        f"input_size={dinov3_input_size}"
     )
     print(f"Feature cache: {'on' if args.cache_features else 'off'} -> {cache_dir}")
     print(f"Output dir: {output_dir}")

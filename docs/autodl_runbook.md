@@ -111,22 +111,40 @@ T1 使用原 V3 attention head 作为当前最新迭代：DINOv3 frozen features
 T1 默认使用较高吞吐配置：
 
 ```text
-batch_size: 64
-num_workers: 8
+batch_size: 256
+num_workers: 16
 amp: true
 amp_dtype: bfloat16
-prefetch_factor: 4
+preprocess_in_workers: true
+prefetch_factor: 6
 ```
 
-如果 `nvidia-smi` 里显存仍明显偏低，可以继续试：
+这版会在 DataLoader worker 内完成 DINOv3 的 224 resize 和 SAT-493M normalize，避免主进程 Hugging Face processor 卡住 GPU。
+
+如果出现 OOM，先降 batch：
 
 ```bash
 python scripts/train_dinov3_boundary_head.py \
   --config configs/train/dinov3_boundary_head_t1.yaml \
-  --batch-size 96
+  --batch-size 128
 ```
 
-如果仍稳定且显存充足，再试 `--batch-size 128`。如果 OOM，就退回 `--batch-size 32` 或 `64`。
+如果 DataLoader worker 不稳定或 CPU 压力太大，降 worker：
+
+```bash
+python scripts/train_dinov3_boundary_head.py \
+  --config configs/train/dinov3_boundary_head_t1.yaml \
+  --batch-size 128 \
+  --num-workers 8
+```
+
+如果需要回退到 Hugging Face processor 主进程预处理：
+
+```bash
+python scripts/train_dinov3_boundary_head.py \
+  --config configs/train/dinov3_boundary_head_t1.yaml \
+  --no-preprocess-in-workers
+```
 
 ## 8. 每次实验前记录
 
