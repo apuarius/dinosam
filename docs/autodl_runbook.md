@@ -149,7 +149,28 @@ python scripts/train_dinov3_boundary_head.py \
   --no-preprocess-in-workers
 ```
 
-## 8. 每次实验前记录
+## 8. 单图自动推理
+
+默认从 test 集随机选择一张已配对图像，调用 `best.pt` 输出二值掩膜、prompt 图、叠加图、boundary/foreground 概率图和 summary：
+
+```bash
+python scripts/infer_single_t1_image.py \
+  --config configs/train/dinov3_boundary_head_t1.yaml \
+  --checkpoint outputs/dinov3_boundary_head_t1/checkpoints/best.pt
+```
+
+指定某一张图像时使用：
+
+```bash
+python scripts/infer_single_t1_image.py \
+  --config configs/train/dinov3_boundary_head_t1.yaml \
+  --checkpoint outputs/dinov3_boundary_head_t1/checkpoints/best.pt \
+  --image data/images/test/your_tile.png
+```
+
+如果有对应 GT mask，可以加 `--mask data/masks/test/your_tile.png` 输出 IoU、Dice 和 Boundary F1。
+
+## 9. 每次实验前记录
 
 ```bash
 git rev-parse HEAD

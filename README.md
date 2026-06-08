@@ -87,6 +87,20 @@ original PIL image to the main process. If startup is still unstable, use
 loading, try `--batch-size 384` or `512` if wall-clock speed matters more than
 per-epoch update count.
 
+## Single Image T1 Inference
+
+Run one random paired image from the test split and save the predicted mask,
+prompt visualization, overlay, probability maps, and summary:
+
+```bash
+python scripts/infer_single_t1_image.py \
+  --config configs/train/dinov3_boundary_head_t1.yaml \
+  --checkpoint outputs/dinov3_boundary_head_t1/checkpoints/best.pt
+```
+
+Use `--image path/to/image.png` for a specific image. Add `--mask path/to/mask.png`
+when ground truth is available and metrics should be reported.
+
 ## Current External Versions
 
 ```bash
