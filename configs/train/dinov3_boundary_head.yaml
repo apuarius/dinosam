@@ -1,4 +1,4 @@
-# DINOv3 patch 检测头训练配置。
+# T1 训练配置：DINOv3 frozen features + attention boundary/foreground head + SAM2 正负点 prompt。
 # 终端默认执行 `python scripts/train_dinov3_boundary_head.py` 会读取这个文件。
 
 data:
@@ -12,7 +12,7 @@ model:
   model_config: configs/model/dinov3_sam2.yaml
 
 output:
-  output_dir: outputs/dinov3_boundary_head_geo
+  output_dir: outputs/dinov3_boundary_head_t1
 
 train:
   epochs: 100
@@ -22,6 +22,7 @@ train:
   weight_decay: 0.0001
 
 head:
+  head_type: t1
   hidden_channels: 256
   dropout: 0.1
 

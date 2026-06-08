@@ -1,6 +1,6 @@
 # AutoDL Runbook
 
-这份手册记录在 AutoDL 上启动 `dinosam-lab` 的最小流程。当前实验使用按区域划分后的新数据集。
+这份手册记录在 AutoDL 上启动 `dinosam-lab` 的最小流程。当前实验使用按区域划分后的新数据集，主线命名为 T1。
 
 ## 1. Clone 仓库
 
@@ -98,11 +98,13 @@ python scripts/check_submodules.py
 
 这一步只检查 submodule 是否存在。
 
-## 7. 训练 V2 baseline
+## 7. 训练 T1
 
 ```bash
-python scripts/train_dinov3_boundary_head.py --config configs/train/dinov3_boundary_head_v2.yaml
+python scripts/train_dinov3_boundary_head.py --config configs/train/dinov3_boundary_head_t1.yaml
 ```
+
+T1 使用原 V3 attention head 作为当前最新迭代：DINOv3 frozen features + attention boundary/foreground head + train-only augmentation + SAM2 box/positive/negative prompts。V1/V2 暂时搁置，只保留为历史配置。
 
 当前配置只对 train 做在线增强，`augment_factor: 4` 会把 1161 张 train tile 扩展为每轮 4644 个训练样本。Val/Test 不增强。由于增强后的图像每次不同，train 特征缓存会自动关闭；Val 特征缓存仍可使用。
 

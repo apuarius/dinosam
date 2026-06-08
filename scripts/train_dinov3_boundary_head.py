@@ -51,13 +51,13 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "val_root": "data/images/val",
     "test_root": "data/images/test",
     "model_config": "configs/model/dinov3_sam2.yaml",
-    "output_dir": "outputs/dinov3_boundary_head_geo",
+    "output_dir": "outputs/dinov3_boundary_head_t1",
     "epochs": 100,
     "batch_size": 16,
     "num_workers": 2,
     "lr": 1e-3,
     "weight_decay": 1e-4,
-    "head_type": "basic",
+    "head_type": "t1",
     "hidden_channels": 256,
     "dropout": 0.1,
     "boundary_loss_weight": 1.0,
@@ -583,7 +583,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
-    parser.add_argument("--head-type", choices=("basic", "aspp", "v2", "attention", "v3"), default=None)
+    parser.add_argument("--head-type", choices=("basic", "aspp", "v2", "attention", "v3", "t1"), default=None)
     parser.add_argument("--hidden-channels", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--boundary-loss-weight", type=float, default=None)

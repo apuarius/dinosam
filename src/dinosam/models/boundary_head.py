@@ -217,7 +217,7 @@ class PatchSelfAttention(nn.Module):
 
 
 class AttentionBoundaryHead(nn.Module):
-    """V3 检测头：在 V2 多尺度上下文后加入 patch self-attention。"""
+    """T1 检测头：ASPP 多尺度上下文加 patch self-attention。"""
 
     def __init__(self, config: PatchDetectionHeadConfig) -> None:
         super().__init__()
@@ -260,7 +260,7 @@ class AttentionBoundaryHead(nn.Module):
 
 
 class PatchDetectionHead:
-    """轻量 patch 检测头工厂，支持 V1 basic 和 V2 aspp 两种结构。"""
+    """轻量 patch 检测头工厂，支持历史 head 和当前 T1 head。"""
 
     @staticmethod
     def build(config: PatchDetectionHeadConfig) -> nn.Module:
@@ -278,6 +278,6 @@ class PatchDetectionHead:
             )
         if head_type in {"aspp", "v2"}:
             return ASPPBoundaryHead(config)
-        if head_type in {"attention", "v3"}:
+        if head_type in {"attention", "v3", "t1"}:
             return AttentionBoundaryHead(config)
         raise ValueError(f"Unsupported patch detection head type: {config.head_type}")

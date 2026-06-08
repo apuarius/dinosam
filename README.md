@@ -54,10 +54,17 @@ data/
 Images and masks are paired by file stem. For example, `data/images/train/tile_001.png`
 can pair with `data/masks/train/tile_001.png`.
 
-## Train
+## T1 Experiment
+
+T1 is the current experiment line. It uses frozen DINOv3 satellite features, the
+attention boundary/foreground head, train-only online augmentation, and SAM2
+box/positive/negative prompts. Earlier V1/V2 configs are kept for reference but
+are not the active training target.
+
+## Train T1
 
 ```bash
-python scripts/train_dinov3_boundary_head.py --config configs/train/dinov3_boundary_head_v2.yaml
+python scripts/train_dinov3_boundary_head.py --config configs/train/dinov3_boundary_head_t1.yaml
 ```
 
 Training uses online augmentation only for `train`. With the default `augment_factor: 4`,

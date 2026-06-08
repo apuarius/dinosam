@@ -96,7 +96,7 @@ def head_config_from_state(
     state_dict: dict[str, torch.Tensor],
     checkpoint_args: dict[str, Any],
 ) -> PatchDetectionHeadConfig:
-    """从 checkpoint 权重形状恢复 V1/V2/V3 检测头结构。"""
+    """从 checkpoint 权重形状恢复历史 head 或 T1 head 结构。"""
     head_type = str(checkpoint_args.get("head_type", "basic")).lower()
     if "0.weight" in state_dict:
         first_weight = state_dict["0.weight"]
