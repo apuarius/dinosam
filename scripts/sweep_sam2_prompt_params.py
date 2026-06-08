@@ -55,12 +55,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--split-root", default=None)
+    parser.add_argument("--split-name", default="val", help="Feature-cache split name, e.g. val or test.")
     parser.add_argument("--output-dir", default="outputs/sweeps/sam2_prompt_params")
     parser.add_argument("--limit-val", type=int, default=50, help="Use <=0 to sweep the full validation split.")
     parser.add_argument("--box-margins", default="56,64")
     parser.add_argument("--boundary-thresholds", default="0.10,0.12,0.14")
     parser.add_argument("--foreground-thresholds", default="0.05,0.06")
     parser.add_argument("--max-prompts", default="56,72")
+    parser.add_argument("--positive-points", default="1")
+    parser.add_argument("--negative-points", default="0,4")
+    parser.add_argument("--negative-ring-radii", default="2")
     parser.add_argument("--min-proposal-area", type=int, default=512)
     parser.add_argument("--prompt-mode", choices=("box", "point", "box_point"), default="box_point")
     parser.add_argument("--multimask-output", action=argparse.BooleanOptionalAction, default=False)
@@ -98,6 +102,7 @@ def prepare_probability_cache(
     training_values: dict[str, Any],
     model_config: dict[str, Any],
     checkpoint_path: Path,
+    split_name: str,
     device: torch.device,
     cache_dir: Path,
     cache_features: bool,
@@ -105,7 +110,7 @@ def prepare_probability_cache(
     """预先计算每张图的 boundary/foreground 概率图，避免每组参数重复跑检测头。"""
     head, checkpoint_metrics = load_boundary_head(checkpoint_path, device=device)
     names = [pair.name for pair in pairs]
-    cached = cache_features and all(path.exists() for path in feature_cache_paths(cache_dir, "val", names))
+    cached = cache_features and all(path.exists() for path in feature_cache_paths(cache_dir, split_name, names))
     dinov3 = None
     if not cached:
         dinov3_config = replace(build_dinov3_config(model_config), device=str(device))
@@ -117,14 +122,14 @@ def prepare_probability_cache(
         image = load_rgb_image(pair.image_path)
         target = load_instance_mask(pair.instance_path) > 0
         if dinov3 is None:
-            feature_path = feature_cache_paths(cache_dir, "val", [pair.name])[0]
+            feature_path = feature_cache_paths(cache_dir, split_name, [pair.name])[0]
             features = torch.load(feature_path, map_location=device).float()[None, ...]
         else:
             features = load_or_extract_features(
                 dinov3=dinov3,
                 images=[pil_image],
                 names=[pair.name],
-                split="val",
+                split=split_name,
                 cache_dir=cache_dir,
                 cache_features=cache_features,
                 device=device,
@@ -152,6 +157,9 @@ def evaluate_combo(
     boundary_threshold: float,
     foreground_threshold: float,
     max_prompts: int,
+    positive_points_per_prompt: int,
+    negative_points_per_prompt: int,
+    negative_ring_radius: int,
     min_proposal_area: int,
     prompt_mode: str,
     multimask_output: bool,
@@ -171,6 +179,9 @@ def evaluate_combo(
             min_area=min_proposal_area,
             box_margin=box_margin,
             max_prompts=max_prompts,
+            positive_points_per_prompt=positive_points_per_prompt,
+            negative_points_per_prompt=negative_points_per_prompt,
+            negative_ring_radius=negative_ring_radius,
         )
         image_start = time.perf_counter()
         prediction, sam2_scores = run_sam2_prompts(
@@ -187,6 +198,9 @@ def evaluate_combo(
             {
                 "tile": item["name"],
                 "prompts": len(prompts),
+                "positive_points": sum(int((np.asarray(prompt.point_labels) == 1).sum()) for prompt in prompts),
+                "negative_points": sum(int((np.asarray(prompt.point_labels) == 0).sum()) for prompt in prompts),
+                "points": sum(int(len(prompt.point_labels)) for prompt in prompts),
                 "iou": mask_iou(prediction, target),
                 "dice": mask_dice(prediction, target),
                 "precision": mask_stats["precision"],
@@ -229,8 +243,10 @@ def main() -> int:
         if training_values.get("feature_cache_dir")
         else train_output_dir / "feature_cache"
     )
+    split_name = str(args.split_name).strip() or "val"
     cache_features = bool(training_values["cache_features"] if args.cache_features is None else args.cache_features)
-    split_root = args.split_root or training_values["val_root"]
+    default_split_root = training_values.get("test_root") if split_name == "test" else training_values["val_root"]
+    split_root = args.split_root or default_split_root
     device = torch.device(args.device or training_values.get("device") or ("cuda" if torch.cuda.is_available() else "cpu"))
     model_config = load_config(resolve_project_path(training_values["model_config"]))
     pairs = limit_pairs(list_instance_tile_pairs(split_root), args.limit_val)
@@ -242,6 +258,7 @@ def main() -> int:
         training_values=training_values,
         model_config=model_config,
         checkpoint_path=checkpoint_path,
+        split_name=split_name,
         device=device,
         cache_dir=cache_dir,
         cache_features=cache_features,
@@ -259,17 +276,29 @@ def main() -> int:
             parse_float_list(args.boundary_thresholds),
             parse_float_list(args.foreground_thresholds),
             parse_int_list(args.max_prompts),
+            parse_int_list(args.positive_points),
+            parse_int_list(args.negative_points),
+            parse_int_list(args.negative_ring_radii),
         )
     )
     print(f"Checkpoint: {checkpoint_path}")
     print(f"Images: {len(items)} from {resolve_project_path(split_root)}")
+    print(f"Split name: {split_name}")
     print(f"Grid size: {len(grid)}")
     print(f"Head model size: {head_size:.2f} MB")
     print(f"Checkpoint size: {ckpt_size:.2f} MB")
     print(f"Output dir: {output_dir}")
 
     result_rows: list[dict[str, Any]] = []
-    for box_margin, boundary_threshold, foreground_threshold, max_prompts in tqdm(
+    for (
+        box_margin,
+        boundary_threshold,
+        foreground_threshold,
+        max_prompts,
+        positive_points,
+        negative_points,
+        negative_ring_radius,
+    ) in tqdm(
         grid,
         desc="sweep params",
         dynamic_ncols=True,
@@ -281,6 +310,9 @@ def main() -> int:
             boundary_threshold=boundary_threshold,
             foreground_threshold=foreground_threshold,
             max_prompts=max_prompts,
+            positive_points_per_prompt=positive_points,
+            negative_points_per_prompt=negative_points,
+            negative_ring_radius=negative_ring_radius,
             min_proposal_area=args.min_proposal_area,
             prompt_mode=args.prompt_mode,
             multimask_output=args.multimask_output,
@@ -291,6 +323,9 @@ def main() -> int:
             "boundary_threshold": boundary_threshold,
             "foreground_threshold": foreground_threshold,
             "max_prompts_per_image": max_prompts,
+            "positive_points_per_prompt": positive_points,
+            "negative_points_per_prompt": negative_points,
+            "negative_ring_radius": negative_ring_radius,
             "images": len(items),
             "mean_prompts": result["mean_prompts"],
             "total_inference_sec": result["total_inference_sec"],
@@ -318,6 +353,8 @@ def main() -> int:
             {
                 "checkpoint": str(checkpoint_path),
                 "images": len(items),
+                "split_root": str(resolve_project_path(split_root)),
+                "split_name": split_name,
                 "grid_size": len(grid),
                 "sort_by": args.sort_by,
                 "min_precision": args.min_precision,
@@ -339,9 +376,14 @@ def main() -> int:
             "boundary_threshold",
             "foreground_threshold",
             "max_prompts_per_image",
+            "positive_points_per_prompt",
+            "negative_points_per_prompt",
+            "negative_ring_radius",
             "mean_iou",
             "mean_dice",
             "mean_boundary_f1",
+            "mean_positive_points",
+            "mean_negative_points",
             "mean_inference_sec",
             "head_model_size_mb",
             "checkpoint_size_mb",

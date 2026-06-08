@@ -1,6 +1,6 @@
 # AutoDL Runbook
 
-这份手册记录在 AutoDL 上启动 `dinosam-lab` 的最小流程。目标是先跑通环境、路径和配置，不在第一步就加载大模型。
+这份手册记录在 AutoDL 上启动 `dinosam-lab` 的最小流程。当前实验使用按区域划分后的新数据集。
 
 ## 1. Clone 仓库
 
@@ -53,24 +53,60 @@ outputs/visualizations/
 当前模型配置期望：
 
 ```text
-weights/dinov3/dinov3_vitl16.pth
+weights/dinov3/dinov3-vitl16-pretrain-sat493m/
 weights/sam2/sam2.1_hiera_large.pt
 ```
 
 SAM2 checkpoint 可以按官方仓库说明下载 `sam2.1_hiera_large.pt`，然后放到 `weights/sam2/`。
 
-DINOv3 权重先按实际获取方式放到 `weights/dinov3/`。如果后续改用 `torch.hub` 默认下载或 Hugging Face 权重，需要同步修改 `configs/model/dinov3_sam2.yaml`。
+DINOv3 SAT-493M Hugging Face 本地目录应包含：
 
-## 5. 路径和配置检查
+```text
+config.json
+model.safetensors
+preprocessor_config.json
+```
+
+## 5. 放置新数据集
+
+正式数据集目录：
+
+```text
+data/
+  images/
+    train/
+    val/
+    test/
+  masks/
+    train/
+    val/
+    test/
+```
+
+图像和 mask 按文件 stem 配对，例如：
+
+```text
+data/images/train/tile_001.png
+data/masks/train/tile_001.png
+```
+
+## 6. 路径和配置检查
 
 ```bash
 python scripts/check_submodules.py
-python -m dinosam.train --config configs/train/smoke.yaml
 ```
 
-这一步只检查配置和路径，不会真正加载 DINOv3/SAM2 权重。
+这一步只检查 submodule 是否存在。
 
-## 6. 每次实验前记录
+## 7. 训练 V2 baseline
+
+```bash
+python scripts/train_dinov3_boundary_head.py --config configs/train/dinov3_boundary_head_v2.yaml
+```
+
+当前配置只对 train 做在线增强，`augment_factor: 4` 会把 1161 张 train tile 扩展为每轮 4644 个训练样本。Val/Test 不增强。由于增强后的图像每次不同，train 特征缓存会自动关闭；Val 特征缓存仍可使用。
+
+## 8. 每次实验前记录
 
 ```bash
 git rev-parse HEAD

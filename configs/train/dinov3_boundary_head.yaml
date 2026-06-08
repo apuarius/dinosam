@@ -2,8 +2,9 @@
 # 终端默认执行 `python scripts/train_dinov3_boundary_head.py` 会读取这个文件。
 
 data:
-  train_root: data/SAM2_dataset_1024_s512/Train
-  val_root: data/SAM2_dataset_1024_s512/Val
+  train_root: data/images/train
+  val_root: data/images/val
+  test_root: data/images/test
   limit_train: null
   limit_val: null
 
@@ -11,7 +12,7 @@ model:
   model_config: configs/model/dinov3_sam2.yaml
 
 output:
-  output_dir: outputs/dinov3_boundary_head
+  output_dir: outputs/dinov3_boundary_head_geo
 
 train:
   epochs: 100
@@ -33,12 +34,41 @@ target:
   target_threshold: 0.05
   gt_boundary_dilation: 4
 
+augment:
+  augment_train: true
+  augment_factor: 4
+  hflip_prob: 0.5
+  vflip_prob: 0.5
+  rotate90_prob: 0.5
+  small_rotate_prob: 0.5
+  small_rotate_degrees: 10.0
+  scale_prob: 0.5
+  scale_min: 0.9
+  scale_max: 1.1
+  translate_prob: 0.5
+  translate_fraction: 0.08
+  brightness_prob: 0.5
+  brightness_min: 0.8
+  brightness_max: 1.2
+  contrast_prob: 0.5
+  contrast_min: 0.8
+  contrast_max: 1.2
+  hsv_prob: 0.5
+  hue_delta: 0.03
+  saturation_min: 0.85
+  saturation_max: 1.15
+  value_min: 0.85
+  value_max: 1.15
+  gamma_prob: 0.5
+  gamma_min: 0.8
+  gamma_max: 1.2
+
 runtime:
   seed: 42
   cache_features: true
   feature_cache_dir: null
   device: null
-  resume: true
+  resume: false
   resume_checkpoint: null
   visualize_every: 5
   visualize_samples: 8

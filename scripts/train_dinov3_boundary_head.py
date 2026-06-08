@@ -2,8 +2,10 @@ import argparse
 import csv
 import json
 import math
+import random
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,7 +17,7 @@ if str(SRC_DIR) not in sys.path:
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
-from PIL import Image  # noqa: E402
+from PIL import Image, ImageEnhance  # noqa: E402
 from torch.utils.data import DataLoader, Dataset  # noqa: E402
 from tqdm.auto import tqdm  # noqa: E402
 
@@ -45,10 +47,11 @@ DEFAULT_CONFIG_PATH = "configs/train/dinov3_boundary_head.yaml"
 
 
 DEFAULT_TRAINING_VALUES: dict[str, Any] = {
-    "train_root": "data/SAM2_dataset_1024_s512/Train",
-    "val_root": "data/SAM2_dataset_1024_s512/Val",
+    "train_root": "data/images/train",
+    "val_root": "data/images/val",
+    "test_root": "data/images/test",
     "model_config": "configs/model/dinov3_sam2.yaml",
-    "output_dir": "outputs/dinov3_boundary_head",
+    "output_dir": "outputs/dinov3_boundary_head_geo",
     "epochs": 100,
     "batch_size": 16,
     "num_workers": 2,
@@ -69,15 +72,42 @@ DEFAULT_TRAINING_VALUES: dict[str, Any] = {
     "cache_features": True,
     "feature_cache_dir": None,
     "device": None,
-    "resume": True,
+    "resume": False,
     "resume_checkpoint": None,
     "visualize_every": 25,
     "visualize_samples": 8,
+    "augment_train": True,
+    "augment_factor": 4,
+    "hflip_prob": 0.5,
+    "vflip_prob": 0.5,
+    "rotate90_prob": 0.5,
+    "small_rotate_prob": 0.5,
+    "small_rotate_degrees": 10.0,
+    "scale_prob": 0.5,
+    "scale_min": 0.9,
+    "scale_max": 1.1,
+    "translate_prob": 0.5,
+    "translate_fraction": 0.08,
+    "brightness_prob": 0.5,
+    "brightness_min": 0.8,
+    "brightness_max": 1.2,
+    "contrast_prob": 0.5,
+    "contrast_min": 0.8,
+    "contrast_max": 1.2,
+    "hsv_prob": 0.5,
+    "hue_delta": 0.03,
+    "saturation_min": 0.85,
+    "saturation_max": 1.15,
+    "value_min": 0.85,
+    "value_max": 1.15,
+    "gamma_prob": 0.5,
+    "gamma_min": 0.8,
+    "gamma_max": 1.2,
 }
 
 
 CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
-    "data": ("train_root", "val_root", "limit_train", "limit_val"),
+    "data": ("train_root", "val_root", "test_root", "limit_train", "limit_val"),
     "model": ("model_config",),
     "output": ("output_dir",),
     "train": ("epochs", "batch_size", "num_workers", "lr", "weight_decay"),
@@ -94,25 +124,275 @@ CONFIG_SECTIONS: dict[str, tuple[str, ...]] = {
         "visualize_every",
         "visualize_samples",
     ),
+    "augment": (
+        "augment_train",
+        "augment_factor",
+        "hflip_prob",
+        "vflip_prob",
+        "rotate90_prob",
+        "small_rotate_prob",
+        "small_rotate_degrees",
+        "scale_prob",
+        "scale_min",
+        "scale_max",
+        "translate_prob",
+        "translate_fraction",
+        "brightness_prob",
+        "brightness_min",
+        "brightness_max",
+        "contrast_prob",
+        "contrast_min",
+        "contrast_max",
+        "hsv_prob",
+        "hue_delta",
+        "saturation_min",
+        "saturation_max",
+        "value_min",
+        "value_max",
+        "gamma_prob",
+        "gamma_min",
+        "gamma_max",
+    ),
 }
+
+
+@dataclass(frozen=True)
+class TrainAugmentConfig:
+    """训练集在线增强配置。"""
+
+    enabled: bool = True
+    factor: int = 4
+    hflip_prob: float = 0.5
+    vflip_prob: float = 0.5
+    rotate90_prob: float = 0.5
+    small_rotate_prob: float = 0.5
+    small_rotate_degrees: float = 10.0
+    scale_prob: float = 0.5
+    scale_min: float = 0.9
+    scale_max: float = 1.1
+    translate_prob: float = 0.5
+    translate_fraction: float = 0.08
+    brightness_prob: float = 0.5
+    brightness_min: float = 0.8
+    brightness_max: float = 1.2
+    contrast_prob: float = 0.5
+    contrast_min: float = 0.8
+    contrast_max: float = 1.2
+    hsv_prob: float = 0.5
+    hue_delta: float = 0.03
+    saturation_min: float = 0.85
+    saturation_max: float = 1.15
+    value_min: float = 0.85
+    value_max: float = 1.15
+    gamma_prob: float = 0.5
+    gamma_min: float = 0.8
+    gamma_max: float = 1.2
+
+
+def probability(value: Any) -> float:
+    """把概率值限制到 0 到 1。"""
+    return max(0.0, min(1.0, float(value)))
+
+
+def build_train_augment_config(args: argparse.Namespace) -> TrainAugmentConfig | None:
+    """从训练参数构建在线增强配置。"""
+    enabled = bool(args.augment_train)
+    factor = max(1, int(args.augment_factor))
+    if not enabled or factor <= 1:
+        return None
+    return TrainAugmentConfig(
+        enabled=enabled,
+        factor=factor,
+        hflip_prob=probability(args.hflip_prob),
+        vflip_prob=probability(args.vflip_prob),
+        rotate90_prob=probability(args.rotate90_prob),
+        small_rotate_prob=probability(args.small_rotate_prob),
+        small_rotate_degrees=float(args.small_rotate_degrees),
+        scale_prob=probability(args.scale_prob),
+        scale_min=float(args.scale_min),
+        scale_max=float(args.scale_max),
+        translate_prob=probability(args.translate_prob),
+        translate_fraction=max(0.0, float(args.translate_fraction)),
+        brightness_prob=probability(args.brightness_prob),
+        brightness_min=float(args.brightness_min),
+        brightness_max=float(args.brightness_max),
+        contrast_prob=probability(args.contrast_prob),
+        contrast_min=float(args.contrast_min),
+        contrast_max=float(args.contrast_max),
+        hsv_prob=probability(args.hsv_prob),
+        hue_delta=max(0.0, float(args.hue_delta)),
+        saturation_min=float(args.saturation_min),
+        saturation_max=float(args.saturation_max),
+        value_min=float(args.value_min),
+        value_max=float(args.value_max),
+        gamma_prob=probability(args.gamma_prob),
+        gamma_min=float(args.gamma_min),
+        gamma_max=float(args.gamma_max),
+    )
+
+
+def _uniform(min_value: float, max_value: float) -> float:
+    """从区间内采样；若配置反向，则自动交换。"""
+    low = min(float(min_value), float(max_value))
+    high = max(float(min_value), float(max_value))
+    return random.uniform(low, high)
+
+
+def _mask_to_image(mask: np.ndarray) -> Image.Image:
+    """把实例 ID mask 转成 PIL 图像，后续几何增强使用最近邻插值。"""
+    return Image.fromarray(mask.astype(np.int32, copy=False), mode="I")
+
+
+def _image_fill_color(image: Image.Image) -> tuple[int, int, int]:
+    """用图像均值填充增强后的空白边缘，避免黑边过强。"""
+    array = np.asarray(image.convert("RGB"), dtype=np.float32)
+    return tuple(int(value) for value in array.reshape(-1, 3).mean(axis=0))
+
+
+def _apply_affine_pair(
+    image: Image.Image,
+    mask_image: Image.Image,
+    *,
+    angle_degrees: float,
+    scale: float,
+    translate_x: float,
+    translate_y: float,
+) -> tuple[Image.Image, Image.Image]:
+    """对图像和实例 mask 同步执行小角度旋转、缩放和平移。"""
+    if abs(angle_degrees) < 1e-6 and abs(scale - 1.0) < 1e-6 and abs(translate_x) < 1e-6 and abs(translate_y) < 1e-6:
+        return image, mask_image
+
+    width, height = image.size
+    cx = width * 0.5
+    cy = height * 0.5
+    safe_scale = max(float(scale), 1e-3)
+    radians = math.radians(angle_degrees)
+    cos_value = math.cos(radians) / safe_scale
+    sin_value = math.sin(radians) / safe_scale
+    matrix = (
+        cos_value,
+        sin_value,
+        cx - cos_value * (cx + translate_x) - sin_value * (cy + translate_y),
+        -sin_value,
+        cos_value,
+        cy + sin_value * (cx + translate_x) - cos_value * (cy + translate_y),
+    )
+    image = image.transform(
+        image.size,
+        Image.Transform.AFFINE,
+        matrix,
+        resample=Image.Resampling.BILINEAR,
+        fillcolor=_image_fill_color(image),
+    )
+    mask_image = mask_image.transform(
+        mask_image.size,
+        Image.Transform.AFFINE,
+        matrix,
+        resample=Image.Resampling.NEAREST,
+        fillcolor=0,
+    )
+    return image, mask_image
+
+
+def _apply_hsv(image: Image.Image, config: TrainAugmentConfig) -> Image.Image:
+    """对 RGB 图像做轻量 HSV 增强。"""
+    hsv = np.asarray(image.convert("HSV"), dtype=np.uint8).copy()
+    hue_shift = int(round(_uniform(-config.hue_delta, config.hue_delta) * 255.0))
+    saturation_factor = _uniform(config.saturation_min, config.saturation_max)
+    value_factor = _uniform(config.value_min, config.value_max)
+    hsv[..., 0] = ((hsv[..., 0].astype(np.int16) + hue_shift) % 256).astype(np.uint8)
+    hsv[..., 1] = np.clip(hsv[..., 1].astype(np.float32) * saturation_factor, 0, 255).astype(np.uint8)
+    hsv[..., 2] = np.clip(hsv[..., 2].astype(np.float32) * value_factor, 0, 255).astype(np.uint8)
+    return Image.fromarray(hsv, mode="HSV").convert("RGB")
+
+
+def _apply_gamma(image: Image.Image, config: TrainAugmentConfig) -> Image.Image:
+    """对 RGB 图像做 Gamma 增强。"""
+    gamma = max(_uniform(config.gamma_min, config.gamma_max), 1e-3)
+    array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    adjusted = np.power(np.clip(array, 0.0, 1.0), gamma)
+    return Image.fromarray(np.clip(adjusted * 255.0, 0, 255).astype(np.uint8), mode="RGB")
+
+
+def apply_train_augmentation(
+    image: Image.Image,
+    instance_mask: np.ndarray,
+    config: TrainAugmentConfig,
+) -> tuple[Image.Image, np.ndarray]:
+    """对训练样本随机选择增强策略，并同步更新实例 mask。"""
+    image = image.convert("RGB")
+    mask_image = _mask_to_image(instance_mask)
+
+    if random.random() < config.hflip_prob:
+        image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+        mask_image = mask_image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    if random.random() < config.vflip_prob:
+        image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        mask_image = mask_image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+    if random.random() < config.rotate90_prob:
+        transpose_op = random.choice(
+            (
+                Image.Transpose.ROTATE_90,
+                Image.Transpose.ROTATE_180,
+                Image.Transpose.ROTATE_270,
+            )
+        )
+        image = image.transpose(transpose_op)
+        mask_image = mask_image.transpose(transpose_op)
+
+    angle = _uniform(-config.small_rotate_degrees, config.small_rotate_degrees) if random.random() < config.small_rotate_prob else 0.0
+    scale = _uniform(config.scale_min, config.scale_max) if random.random() < config.scale_prob else 1.0
+    translate_x = 0.0
+    translate_y = 0.0
+    if random.random() < config.translate_prob:
+        width, height = image.size
+        translate_x = _uniform(-config.translate_fraction, config.translate_fraction) * width
+        translate_y = _uniform(-config.translate_fraction, config.translate_fraction) * height
+    image, mask_image = _apply_affine_pair(
+        image,
+        mask_image,
+        angle_degrees=angle,
+        scale=scale,
+        translate_x=translate_x,
+        translate_y=translate_y,
+    )
+
+    if random.random() < config.brightness_prob:
+        image = ImageEnhance.Brightness(image).enhance(_uniform(config.brightness_min, config.brightness_max))
+    if random.random() < config.contrast_prob:
+        image = ImageEnhance.Contrast(image).enhance(_uniform(config.contrast_min, config.contrast_max))
+    if random.random() < config.hsv_prob:
+        image = _apply_hsv(image, config)
+    if random.random() < config.gamma_prob:
+        image = _apply_gamma(image, config)
+
+    return image, np.asarray(mask_image, dtype=np.int32)
 
 
 class InstanceTileDataset(Dataset):
     """读取遥感切片和同名实例 mask，供检测头训练使用。"""
 
-    def __init__(self, pairs: list[InstanceTilePair]) -> None:
+    def __init__(self, pairs: list[InstanceTilePair], augment_config: TrainAugmentConfig | None = None) -> None:
         """保存已经配对好的 Image/Instance 文件路径列表。"""
         self.pairs = pairs
+        self.augment_config = augment_config
 
     def __len__(self) -> int:
         """返回数据集中的切片数量。"""
+        return len(self.pairs) * (self.augment_config.factor if self.augment_config is not None else 1)
+
+    @property
+    def base_size(self) -> int:
+        """返回未增强前的原始切片数量。"""
         return len(self.pairs)
 
     def __getitem__(self, index: int) -> dict[str, Any]:
         """读取单个样本，并复制数组以避免只读 numpy 警告。"""
-        pair = self.pairs[index]
+        pair = self.pairs[index % len(self.pairs)]
         image = Image.open(pair.image_path).convert("RGB")
         instance_mask = load_instance_mask(pair.instance_path).copy()
+        if self.augment_config is not None:
+            image, instance_mask = apply_train_augmentation(image, instance_mask, self.augment_config)
         return {
             "image": image,
             "instance_mask": instance_mask,
@@ -322,6 +602,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resume-checkpoint", default=None)
     parser.add_argument("--visualize-every", type=int, default=None)
     parser.add_argument("--visualize-samples", type=int, default=None)
+    parser.add_argument("--augment-train", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--augment-factor", type=int, default=None)
     return parser
 
 
@@ -386,16 +668,25 @@ def limit_pairs(pairs: list[InstanceTilePair], limit: int | None) -> list[Instan
     return pairs[:limit]
 
 
+def seed_worker(worker_id: int) -> None:
+    """让 DataLoader worker 内的随机增强可以随全局 seed 复现。"""
+    del worker_id
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
+
+
 def make_loader(
     dataset_root: str,
     limit: int | None,
     batch_size: int,
     num_workers: int,
     shuffle: bool,
+    augment_config: TrainAugmentConfig | None = None,
 ) -> DataLoader:
     """根据数据集根目录构建 PyTorch DataLoader。"""
     pairs = limit_pairs(list_instance_tile_pairs(dataset_root), limit)
-    dataset = InstanceTileDataset(pairs)
+    dataset = InstanceTileDataset(pairs, augment_config=augment_config)
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -403,6 +694,7 @@ def make_loader(
         num_workers=num_workers,
         collate_fn=collate_tiles,
         pin_memory=torch.cuda.is_available(),
+        worker_init_fn=seed_worker if num_workers > 0 else None,
     )
 
 
@@ -696,6 +988,7 @@ def run_epoch(
         ascii=True,
         bar_format="{l_bar}{bar:14}{r_bar}",
     )
+    batch_cache_features = args.cache_features and not (training and args.augment_train and args.augment_factor > 1)
     for batch in bar:
         images = batch["images"]
         names = batch["names"]
@@ -706,7 +999,7 @@ def run_epoch(
             names=names,
             split=split,
             cache_dir=cache_dir,
-            cache_features=args.cache_features,
+            cache_features=batch_cache_features,
             device=device,
         )
         targets = build_patch_targets(
@@ -933,6 +1226,7 @@ def main() -> int:
         )
     ).to(device)
     optimizer = torch.optim.AdamW(head.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    train_augment_config = build_train_augment_config(args)
 
     train_loader = make_loader(
         args.train_root,
@@ -940,6 +1234,7 @@ def main() -> int:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=True,
+        augment_config=train_augment_config,
     )
     val_loader = make_loader(
         args.val_root,
@@ -947,12 +1242,18 @@ def main() -> int:
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         shuffle=False,
+        augment_config=None,
     )
 
     print(f"Config: {args.config}")
     print(f"Device: {device}")
-    print(f"Train images: {len(train_loader.dataset)}")
+    print(f"Train tiles: {train_loader.dataset.base_size}")
+    print(f"Train samples/epoch: {len(train_loader.dataset)}")
     print(f"Val images: {len(val_loader.dataset)}")
+    if train_augment_config is not None:
+        print(f"Train augmentation: on, factor={train_augment_config.factor}; train feature cache disabled")
+    else:
+        print("Train augmentation: off")
     print(f"Head type: {args.head_type}")
     print(f"Metric threshold: {args.metric_threshold}")
     print(f"Feature cache: {'on' if args.cache_features else 'off'} -> {cache_dir}")

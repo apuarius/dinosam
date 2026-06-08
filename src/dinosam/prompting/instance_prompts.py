@@ -11,7 +11,7 @@ PromptMode = Literal["box", "point", "box_point"]
 
 @dataclass(frozen=True)
 class InstancePrompt:
-    """保存单个实例转成 SAM2 prompt 所需的 box、正点和面积。"""
+    """保存单个实例转成 SAM2 prompt 所需的 box、正负点和面积。"""
 
     instance_id: int
     box: np.ndarray

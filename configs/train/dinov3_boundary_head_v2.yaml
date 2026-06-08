@@ -1,13 +1,14 @@
 # DINOv3 边界检测头 V2 训练配置：使用 ASPP 多尺度检测头。
 data:  # 数据集路径与样本数量设置。
-  train_root: data/SAM2_dataset_1024_s512/Train  # 训练集目录，内部应包含 Image/ 和 Instance/。
-  val_root: data/SAM2_dataset_1024_s512/Val  # 验证集目录，内部应包含 Image/ 和 Instance/。
+  train_root: data/images/train  # 训练集图像目录；mask 会自动匹配 data/masks/train。
+  val_root: data/images/val  # 验证集图像目录；mask 会自动匹配 data/masks/val。
+  test_root: data/images/test  # 测试集图像目录；只用于最终报告，不参与训练和调参。
   limit_train: null  # 训练集截断数量；null 表示使用全部训练样本。
   limit_val: null  # 验证集截断数量；null 表示使用全部验证样本。
 model:  # 模型权重和模型结构配置入口。
   model_config: configs/model/dinov3_sam2.yaml  # DINOv3 与 SAM2 的统一模型配置文件。
 output:  # 训练输出目录设置。
-  output_dir: outputs/dinov3_boundary_head_v2  # V2 checkpoint、指标、可视化和特征缓存输出目录。
+  output_dir: outputs/dinov3_boundary_head_v2_geo  # V2 checkpoint、指标、可视化和特征缓存输出目录。
 train:  # 优化器和训练轮数设置。
   epochs: 200  # 总训练轮数；resume=true 时会从 last.pt 继续到该轮数。
   batch_size: 16  # 每个 batch 的图像数量。
@@ -25,12 +26,40 @@ loss:  # boundary 与 foreground 两个任务的损失权重。
 target:  # 从实例 mask 构造 patch 级监督目标的参数。
   target_threshold: 0.05  # soft target 大于该值时视为正样本。
   gt_boundary_dilation: 4  # GT 边界像素膨胀半径，缓解 patch 级边界稀疏问题。
+augment:  # 只作用于 train；val/test 不增强。
+  augment_train: true  # 开启在线训练增强。
+  augment_factor: 4  # 1161 张 train tile 每轮扩展为 4644 个在线样本。
+  hflip_prob: 0.5  # 水平翻转概率。
+  vflip_prob: 0.5  # 垂直翻转概率。
+  rotate90_prob: 0.5  # 90/180/270 度旋转概率。
+  small_rotate_prob: 0.5  # 小角度旋转概率。
+  small_rotate_degrees: 10.0  # 小角度旋转范围，单位度。
+  scale_prob: 0.5  # 小范围缩放概率。
+  scale_min: 0.9  # 最小缩放比例。
+  scale_max: 1.1  # 最大缩放比例。
+  translate_prob: 0.5  # 小范围平移概率。
+  translate_fraction: 0.08  # 平移范围占图像宽高的比例。
+  brightness_prob: 0.5  # 亮度增强概率。
+  brightness_min: 0.8  # 最小亮度系数。
+  brightness_max: 1.2  # 最大亮度系数。
+  contrast_prob: 0.5  # 对比度增强概率。
+  contrast_min: 0.8  # 最小对比度系数。
+  contrast_max: 1.2  # 最大对比度系数。
+  hsv_prob: 0.5  # HSV 增强概率。
+  hue_delta: 0.03  # 色相扰动范围，按 0-1 归一化色相。
+  saturation_min: 0.85  # 最小饱和度系数。
+  saturation_max: 1.15  # 最大饱和度系数。
+  value_min: 0.85  # 最小明度系数。
+  value_max: 1.15  # 最大明度系数。
+  gamma_prob: 0.5  # Gamma 增强概率。
+  gamma_min: 0.8  # 最小 Gamma。
+  gamma_max: 1.2  # 最大 Gamma。
 runtime:  # 运行时、缓存和续训设置。
   seed: 42  # 随机种子，保证实验尽量可复现。
   cache_features: true  # 是否缓存冻结 DINOv3 特征，加速后续训练。
   feature_cache_dir: null  # 自定义特征缓存目录；null 时使用 output_dir/feature_cache。
   device: null  # 训练设备；null 时自动使用 cuda 或 cpu。
-  resume: true  # 是否从 last.pt 自动续训。
+  resume: false  # 新区域数据集从头训练，避免误用旧 checkpoint。
   resume_checkpoint: null  # 指定续训 checkpoint；null 时默认使用 output_dir/checkpoints/last.pt。
   visualize_every: 25  # 每隔多少轮保存一次验证集可视化。
   visualize_samples: 8  # 每次保存的验证可视化样本数量。
