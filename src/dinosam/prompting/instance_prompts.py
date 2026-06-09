@@ -3,9 +3,6 @@ from typing import Literal
 
 import numpy as np
 
-from dinosam.data.instance_tiles import instance_ids
-
-
 PromptMode = Literal["box", "point", "box_point"]
 
 
@@ -63,30 +60,6 @@ def prompt_from_binary_mask(
         point_labels=point_labels,
         area=int(binary_mask.sum()),
     )
-
-
-def prompts_from_instance_mask(
-    instance_mask: np.ndarray,
-    min_area: int = 1,
-    box_margin: int = 0,
-    max_instances: int | None = None,
-) -> list[InstancePrompt]:
-    """把一张实例 mask 中的每个实例转换成 SAM2 prompt。"""
-    prompts: list[InstancePrompt] = []
-    for instance_id in instance_ids(instance_mask, min_area=min_area):
-        binary_mask = instance_mask == instance_id
-        prompts.append(
-            prompt_from_binary_mask(
-                binary_mask,
-                instance_id=instance_id,
-                box_margin=box_margin,
-            )
-        )
-
-        if max_instances is not None and len(prompts) >= max_instances:
-            break
-
-    return prompts
 
 
 def build_sam2_prompt_kwargs(prompt: InstancePrompt, mode: PromptMode) -> dict[str, np.ndarray]:

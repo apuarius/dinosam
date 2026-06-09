@@ -17,7 +17,8 @@ import torch  # noqa: E402
 from PIL import Image, ImageDraw  # noqa: E402
 from tqdm.auto import tqdm  # noqa: E402
 
-from dinosam.data.instance_tiles import (  # noqa: E402
+from dinosam.config import load_config  # noqa: E402
+from dinosam.data import (  # noqa: E402
     InstanceTilePair,
     list_instance_tile_pairs,
     load_instance_mask,
@@ -38,9 +39,11 @@ from dinosam.models import (  # noqa: E402
     build_sam2_config,
 )
 from dinosam.project import resolve_project_path  # noqa: E402
-from dinosam.prompting import InstancePrompt, build_sam2_prompt_kwargs  # noqa: E402
-from dinosam.prompting.instance_prompts import prompt_from_binary_mask  # noqa: E402
-from dinosam.train import load_config  # noqa: E402
+from dinosam.prompting import (  # noqa: E402
+    InstancePrompt,
+    build_sam2_prompt_kwargs,
+    prompt_from_binary_mask,
+)
 from train_dinov3_boundary_head import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     feature_cache_paths,
@@ -99,22 +102,16 @@ def head_config_from_state(
     state_dict: dict[str, torch.Tensor],
     checkpoint_args: dict[str, Any],
 ) -> PatchDetectionHeadConfig:
-    """从 checkpoint 权重形状恢复历史 head 或 T1 head 结构。"""
-    head_type = str(checkpoint_args.get("head_type", "basic")).lower()
-    if "0.weight" in state_dict:
-        first_weight = state_dict["0.weight"]
-        last_weight = state_dict["6.weight"]
-        output_channels = int(last_weight.shape[0])
-        head_type = "basic"
-    else:
-        first_weight = state_dict["reduce.0.weight"]
-        output_channels = 2
+    """从 checkpoint 权重形状恢复 T1 head 结构。"""
+    if "reduce.0.weight" not in state_dict:
+        raise ValueError("Only T1 boundary-head checkpoints are supported.")
+    first_weight = state_dict["reduce.0.weight"]
     return PatchDetectionHeadConfig(
         input_channels=int(first_weight.shape[1]),
         hidden_channels=int(first_weight.shape[0]),
         dropout=float(checkpoint_args.get("dropout", 0.1)),
-        output_channels=output_channels,
-        head_type=head_type,
+        output_channels=2,
+        head_type="t1",
     )
 
 

@@ -1,16 +1,7 @@
-from dataclasses import dataclass
 from typing import Any, Mapping
 
 from dinosam.models.dinov3_wrapper import DINOv3Config
 from dinosam.models.sam2_wrapper import SAM2Config
-
-
-@dataclass(frozen=True)
-class ModelConfigs:
-    """统一保存一次实验中 DINOv3 和 SAM2 的模型配置。"""
-
-    dinov3: DINOv3Config
-    sam2: SAM2Config
 
 
 def _section(config: Mapping[str, Any], name: str) -> Mapping[str, Any]:
@@ -46,12 +37,4 @@ def build_sam2_config(config: Mapping[str, Any]) -> SAM2Config:
         checkpoint=section.get("checkpoint"),
         device=section.get("device", "cuda"),
         mode=section.get("mode", "eval"),
-    )
-
-
-def build_model_configs(config: Mapping[str, Any]) -> ModelConfigs:
-    """把完整模型配置转换成 wrapper 可以直接使用的配置对象。"""
-    return ModelConfigs(
-        dinov3=build_dinov3_config(config),
-        sam2=build_sam2_config(config),
     )

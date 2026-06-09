@@ -21,7 +21,8 @@ from PIL import Image, ImageEnhance  # noqa: E402
 from torch.utils.data import DataLoader, Dataset  # noqa: E402
 from tqdm.auto import tqdm  # noqa: E402
 
-from dinosam.data.instance_tiles import (  # noqa: E402
+from dinosam.config import load_config  # noqa: E402
+from dinosam.data import (  # noqa: E402
     InstanceTilePair,
     list_instance_tile_pairs,
     load_instance_mask,
@@ -32,18 +33,17 @@ from dinosam.evaluation import (  # noqa: E402
     score_map_average_precision,
     score_map_auc,
 )
-from dinosam.features import extract_patch_feature_grid  # noqa: E402
 from dinosam.models import (  # noqa: E402
     DINOv3Wrapper,
     PatchDetectionHead,
     PatchDetectionHeadConfig,
     build_dinov3_config,
+    extract_patch_feature_grid,
 )
 from dinosam.project import resolve_project_path  # noqa: E402
-from dinosam.train import load_config  # noqa: E402
 
 
-DEFAULT_CONFIG_PATH = "configs/train/dinov3_boundary_head.yaml"
+DEFAULT_CONFIG_PATH = "configs/train/dinov3_boundary_head_t1.yaml"
 
 
 DEFAULT_TRAINING_VALUES: dict[str, Any] = {
@@ -628,7 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
     parser.add_argument("--weight-decay", type=float, default=None)
-    parser.add_argument("--head-type", choices=("basic", "aspp", "v2", "attention", "v3", "t1"), default=None)
+    parser.add_argument("--head-type", choices=("t1",), default=None)
     parser.add_argument("--hidden-channels", type=int, default=None)
     parser.add_argument("--dropout", type=float, default=None)
     parser.add_argument("--boundary-loss-weight", type=float, default=None)

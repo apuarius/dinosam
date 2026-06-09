@@ -18,7 +18,8 @@ import torch  # noqa: E402
 from PIL import Image  # noqa: E402
 from tqdm.auto import tqdm  # noqa: E402
 
-from dinosam.data.instance_tiles import list_instance_tile_pairs, load_instance_mask, load_rgb_image  # noqa: E402
+from dinosam.config import load_config  # noqa: E402
+from dinosam.data import list_instance_tile_pairs, load_instance_mask, load_rgb_image  # noqa: E402
 from dinosam.evaluation import (  # noqa: E402
     PredictionInstance,
     binary_instances_from_label_mask,
@@ -26,7 +27,6 @@ from dinosam.evaluation import (  # noqa: E402
 )
 from dinosam.models import DINOv3Wrapper, SAM2ImageWrapper, build_dinov3_config, build_sam2_config  # noqa: E402
 from dinosam.project import resolve_project_path  # noqa: E402
-from dinosam.train import load_config  # noqa: E402
 from run_boundary_head_sam2_prompts import (  # noqa: E402
     DEFAULT_CONFIG_PATH,
     build_auto_prompts,

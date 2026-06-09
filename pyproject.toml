@@ -19,6 +19,3 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[project.scripts]
-dinosam-train = "dinosam.train:main"

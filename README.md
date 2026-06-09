@@ -31,12 +31,6 @@ git submodule update --init --recursive
 pip install -e .
 ```
 
-## Checks
-
-```bash
-python scripts/check_submodules.py
-```
-
 ## Dataset Layout
 
 ```text
@@ -58,8 +52,7 @@ can pair with `data/masks/train/tile_001.png`.
 
 T1 is the current experiment line. It uses frozen DINOv3 satellite features, the
 attention boundary/foreground head, train-only online augmentation, and SAM2
-box/positive-point prompts. Earlier V1/V2 configs are kept for reference but
-are not the active training target.
+box/positive-point prompts.
 
 ## Train T1
 

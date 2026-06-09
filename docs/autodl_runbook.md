@@ -27,26 +27,16 @@ pip install -e .
 
 这一步会让 Python 识别 `src/dinosam` 包，并安装 `pyyaml`。
 
-## 3. 准备工作目录
+## 3. 创建本地目录
 
 ```bash
-python scripts/prepare_workspace.py
+mkdir -p \
+  data/images/{train,val,test} \
+  data/masks/{train,val,test} \
+  weights/dinov3 \
+  weights/sam2 \
+  outputs
 ```
-
-这个脚本会创建：
-
-```text
-data/
-weights/
-weights/dinov3/
-weights/sam2/
-outputs/
-outputs/runs/
-outputs/predictions/
-outputs/visualizations/
-```
-
-它还会根据 `configs/model/dinov3_sam2.yaml` 打印当前期望的权重路径。
 
 ## 4. 放置权重
 
@@ -90,13 +80,13 @@ data/images/train/tile_001.png
 data/masks/train/tile_001.png
 ```
 
-## 6. 路径和配置检查
+## 6. Submodule 检查
 
 ```bash
-python scripts/check_submodules.py
+git submodule status
 ```
 
-这一步只检查 submodule 是否存在。
+输出行开头不是 `-` 即表示 submodule 已初始化。
 
 ## 7. 训练 T1
 
@@ -104,7 +94,7 @@ python scripts/check_submodules.py
 python scripts/train_dinov3_boundary_head.py --config configs/train/dinov3_boundary_head_t1.yaml
 ```
 
-T1 使用原 V3 attention head 作为当前最新迭代：DINOv3 frozen features + attention boundary/foreground head + train-only augmentation + SAM2 box/positive-point prompts。V1/V2 暂时搁置，只保留为历史配置。
+T1 是当前唯一维护的实验线：DINOv3 frozen features + attention boundary/foreground head + train-only augmentation + SAM2 box/positive-point prompts。
 
 当前配置只对 train 做在线增强，`augment_factor: 4` 会把 1161 张 train tile 扩展为每轮 4644 个训练样本。Val/Test 不增强。由于增强后的图像每次不同，train 特征缓存会自动关闭；Val 特征缓存仍可使用。
 

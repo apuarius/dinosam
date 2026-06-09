@@ -18,7 +18,8 @@ for path in (SRC_DIR, SCRIPT_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from dinosam.data.instance_tiles import (  # noqa: E402
+from dinosam.config import load_config  # noqa: E402
+from dinosam.data import (  # noqa: E402
     InstanceTilePair,
     list_instance_tile_pairs,
     load_instance_mask,
@@ -31,7 +32,6 @@ from dinosam.evaluation import (  # noqa: E402
 )
 from dinosam.models import SAM2ImageWrapper, build_sam2_config  # noqa: E402
 from dinosam.project import resolve_project_path  # noqa: E402
-from dinosam.train import load_config  # noqa: E402
 from run_boundary_head_sam2_prompts import (  # noqa: E402
     blend_mask,
     build_auto_prompts,

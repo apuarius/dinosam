@@ -32,12 +32,6 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 MASK_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tif", ".tiff"}
 
 
-def resolve_instance_dataset_root(dataset_root: str | Path) -> Path:
-    """解析实例数据集根目录，并兼容外层目录下还有 All 子目录的情况。"""
-    dirs = resolve_instance_dataset_dirs(dataset_root)
-    return dirs.image_dir.parent
-
-
 def resolve_instance_dataset_dirs(dataset_root: str | Path) -> InstanceDatasetDirs:
     """解析实例数据集目录，兼容 Image/Instance 与 images/split、masks/split 结构。"""
     root = resolve_project_path(dataset_root)
@@ -105,18 +99,3 @@ def load_instance_mask(path: str | Path) -> np.ndarray:
     if mask.ndim != 2:
         raise ValueError(f"Instance mask must be a 2D image: {path}")
     return mask
-
-
-def instance_ids(mask: np.ndarray, min_area: int = 1) -> list[int]:
-    """从实例 mask 中提取面积不小于阈值的非背景实例 ID。"""
-    if mask.ndim != 2:
-        raise ValueError("Instance mask must be a 2D array.")
-
-    counts = np.bincount(mask.astype(np.int64, copy=False).ravel())
-    ids: list[int] = []
-    for instance_id, area in enumerate(counts):
-        if instance_id == 0:
-            continue
-        if area >= min_area:
-            ids.append(instance_id)
-    return ids
